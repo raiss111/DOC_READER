@@ -8,7 +8,9 @@ import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, FastAPI, File, HTTPException, Query, UploadFile, status
+from fastapi.responses import FileResponse
 from fastapi.security import APIKeyHeader
+from fastapi.staticfiles import StaticFiles
 
 from .answering import Answerer
 from .config import Settings
@@ -35,8 +37,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.store = store
     app.state.settings = settings
-    router = APIRouter(prefix="/api/v1")
 
+    # ---- Service du frontend (HTML/CSS/JS) ----
+    static_dir = Path(__file__).resolve().parents[1] / "static"
+    static_dir.mkdir(exist_ok=True)
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/", include_in_schema=False)
+    def serve_frontend() -> FileResponse:
+        return FileResponse(static_dir / "index.html")
+    # -------------------------------------------
+
+    router = APIRouter(prefix="/api/v1")
     def verify_api_key(provided: str | None = Depends(header_scheme)) -> None:
         if settings.app_api_key and (not provided or not secrets.compare_digest(provided, settings.app_api_key)):
             raise HTTPException(status_code=401, detail="Clé API absente ou incorrecte.")
