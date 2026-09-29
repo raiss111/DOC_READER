@@ -10,19 +10,21 @@
     <div class="app">
         <!-- SIDEBAR -->
         <aside class="sidebar" id="sidebar">
+            <!-- En-tête : label + bouton + encadré -->
             <div class="sidebar-header">
-                <button class="btn-new-chat" id="btn-new-chat">
+                <span class="sidebar-header-label">Nouvelle conversation</span>
+                <button class="btn-new-chat" id="btn-new-chat" title="Nouvelle conversation" aria-label="Nouvelle conversation">
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="12" y1="5" x2="12" y2="19"/>
                         <line x1="5" y1="12" x2="19" y2="12"/>
                     </svg>
-                    Nouvelle conversation
                 </button>
             </div>
 
-            <div class="sidebar-spacer"></div>
+            <!-- Liste des conversations -->
+            <nav class="conversations" id="conversations"></nav>
 
-            <!-- Section Documents (en bas) -->
+            <!-- Bas : Documents -->
             <div class="sidebar-footer">
                 <button class="sidebar-docs-btn" id="btn-open-docs">
                     <span class="sidebar-docs-icon">
@@ -151,7 +153,7 @@
         </div>
     </div>
 
-    <!-- Modale : confirmer la suppression -->
+    <!-- Modale : confirmer la suppression d'un document -->
     <div class="modal-backdrop" id="modal-delete" hidden>
         <div class="modal">
             <div class="modal-title">Supprimer le document</div>
@@ -162,6 +164,21 @@
             <div class="modal-actions">
                 <button class="btn-modal-cancel" id="btn-delete-cancel">Annuler</button>
                 <button class="btn-modal-danger" id="btn-delete-confirm">Supprimer</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modale : confirmer la suppression d'une conversation -->
+    <div class="modal-backdrop" id="modal-delete-convo" hidden>
+        <div class="modal">
+            <div class="modal-title">Supprimer la conversation</div>
+            <div class="modal-body">
+                <p id="delete-convo-name" class="modal-doc-name"></p>
+                <p class="modal-hint">Cette action supprime définitivement l'historique de cette conversation.</p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-modal-cancel" id="btn-delete-convo-cancel">Annuler</button>
+                <button class="btn-modal-danger" id="btn-delete-convo-confirm">Supprimer</button>
             </div>
         </div>
     </div>

@@ -34,41 +34,102 @@ const ICONS = {
     <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
     <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
   </svg>`,
+
+  close: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <line x1="18" y1="6" x2="6" y2="18"/>
+    <line x1="6" y1="6" x2="18" y2="18"/>
+  </svg>`,
 };
 
 // ============================================================
-//  Conversation active (une seule, garde le titre auto)
+//  Gestion multi-conversations (100% frontend)
 // ============================================================
-const CONVO_KEY = "vodacom_convo";
+const CONVOS_KEY = "vodacom_conversations";
+const ACTIVE_CONVO_KEY = "vodacom_active_convo";
 
-function loadConversation() {
-  try { return JSON.parse(localStorage.getItem(CONVO_KEY)) || null; }
-  catch { return null; }
+function loadConversations() {
+  try { return JSON.parse(localStorage.getItem(CONVOS_KEY)) || []; }
+  catch { return []; }
 }
-function saveConversation(c) { localStorage.setItem(CONVO_KEY, JSON.stringify(c)); }
+
+function saveConversations(convos) {
+  try {
+    localStorage.setItem(CONVOS_KEY, JSON.stringify(convos));
+  } catch (e) {
+    console.error("saveConversations failed:", e);
+  }
+}
+
+function getActiveConvoId() {
+  return localStorage.getItem(ACTIVE_CONVO_KEY);
+}
+
+function setActiveConvoId(id) {
+  localStorage.setItem(ACTIVE_CONVO_KEY, id);
+}
 
 function createConversation() {
+  const id = "convo-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now();
   const convo = {
-    id: "convo-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now(),
+    id,
     title: "Nouvelle conversation",
     messages: [],
     created_at: Date.now(),
     updated_at: Date.now(),
   };
-  saveConversation(convo);
+  const convos = loadConversations();
+  convos.unshift(convo);
+  saveConversations(convos);
+  setActiveConvoId(id);
   return convo;
 }
 
-function appendMessageToConvo(message) {
-  const convo = loadConversation();
-  if (!convo) return;
-  convo.messages.push({ ...message, ts: Date.now() });
-  convo.updated_at = Date.now();
-  saveConversation(convo);
+// ⚠️ Toujours relire depuis localStorage : évite la désynchronisation
+function getActiveConversation() {
+  const id = getActiveConvoId();
+  const convos = loadConversations();
+  return convos.find((c) => c.id === id) || null;
 }
 
-let activeConvo = loadConversation();
-if (!activeConvo) activeConvo = createConversation();
+function appendMessageToConvo(id, message) {
+  const convos = loadConversations();
+  const idx = convos.findIndex((c) => c.id === id);
+  if (idx === -1) {
+    console.warn("appendMessageToConvo : conversation introuvable", id);
+    return;
+  }
+  convos[idx].messages = convos[idx].messages || [];
+  convos[idx].messages.push({ ...message, ts: Date.now() });
+  convos[idx].updated_at = Date.now();
+
+  // Titre auto à partir du premier message utilisateur
+  if (message.role === "user" && convos[idx].title === "Nouvelle conversation") {
+    convos[idx].title = message.text.slice(0, 40) + (message.text.length > 40 ? "…" : "");
+  }
+  saveConversations(convos);
+}
+
+function deleteConversation(id) {
+  let convos = loadConversations();
+  convos = convos.filter((c) => c.id !== id);
+  saveConversations(convos);
+  if (getActiveConvoId() === id) {
+    if (convos.length > 0) {
+      setActiveConvoId(convos[0].id);
+    } else {
+      // Crée une nouvelle conversation si toutes supprimées
+      createConversation();
+    }
+  }
+}
+
+// Initialisation : charge ou crée la conversation active
+(function initActiveConvo() {
+  let convo = getActiveConversation();
+  if (!convo) {
+    convo = createConversation();
+  }
+})();
 
 // ============================================================
 //  DOM
@@ -80,6 +141,7 @@ const sendBtn = form.querySelector("button[type='submit']");
 const btnNewChat = document.getElementById("btn-new-chat");
 const sidebar = document.getElementById("sidebar");
 const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
+const conversationsEl = document.getElementById("conversations");
 
 const btnOpenDocs = document.getElementById("btn-open-docs");
 const docsCount = document.getElementById("docs-count");
@@ -106,6 +168,11 @@ const deleteDocName = document.getElementById("delete-doc-name");
 const btnDeleteCancel = document.getElementById("btn-delete-cancel");
 const btnDeleteConfirm = document.getElementById("btn-delete-confirm");
 
+const modalDeleteConvo = document.getElementById("modal-delete-convo");
+const deleteConvoName = document.getElementById("delete-convo-name");
+const btnDeleteConvoCancel = document.getElementById("btn-delete-convo-cancel");
+const btnDeleteConvoConfirm = document.getElementById("btn-delete-convo-confirm");
+
 // ============================================================
 //  Helpers
 // ============================================================
@@ -124,6 +191,107 @@ async function extractError(res) {
   } catch {}
   return detail;
 }
+
+// ============================================================
+//  Sidebar : liste des conversations
+// ============================================================
+function renderConversations() {
+  const convos = loadConversations();
+  conversationsEl.innerHTML = "";
+
+  if (convos.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "conversations-empty";
+    empty.textContent = "Aucune conversation";
+    conversationsEl.appendChild(empty);
+    return;
+  }
+
+  const activeId = getActiveConvoId();
+  convos.forEach((c) => {
+    const item = document.createElement("div");
+    item.className = "convo-item" + (c.id === activeId ? " active" : "");
+    item.title = c.title;
+
+    const dot = document.createElement("span");
+    dot.className = "convo-dot";
+
+    const label = document.createElement("span");
+    label.className = "convo-label";
+    label.textContent = c.title;
+
+    const actions = document.createElement("div");
+    actions.className = "convo-actions";
+
+    const btnDelete = document.createElement("button");
+    btnDelete.className = "convo-btn danger";
+    btnDelete.title = "Supprimer cette conversation";
+    btnDelete.innerHTML = ICONS.trash;
+    btnDelete.addEventListener("click", (e) => {
+      e.stopPropagation();
+      openDeleteConvoModal(c);
+    });
+    actions.appendChild(btnDelete);
+
+    item.appendChild(dot);
+    item.appendChild(label);
+    item.appendChild(actions);
+
+    item.addEventListener("click", () => switchConversation(c.id));
+
+    conversationsEl.appendChild(item);
+  });
+}
+
+function switchConversation(id) {
+  setActiveConvoId(id);
+  renderMessages();       // relit activeConvo depuis localStorage
+  renderConversations();
+  input.focus();
+}
+
+// ============================================================
+//  Nouvelle conversation
+// ============================================================
+btnNewChat.addEventListener("click", () => {
+  createConversation();
+  renderMessages();
+  renderConversations();
+  input.focus();
+});
+
+// ============================================================
+//  Modale suppression de conversation
+// ============================================================
+let convoToDelete = null;
+
+function openDeleteConvoModal(convo) {
+  convoToDelete = convo;
+  deleteConvoName.textContent = convo.title;
+  modalDeleteConvo.hidden = false;
+}
+
+btnDeleteConvoCancel.addEventListener("click", () => {
+  modalDeleteConvo.hidden = true;
+  convoToDelete = null;
+});
+
+btnDeleteConvoConfirm.addEventListener("click", () => {
+  if (!convoToDelete) return;
+  deleteConversation(convoToDelete.id);
+  convoToDelete = null;
+  modalDeleteConvo.hidden = true;
+  renderMessages();
+  renderConversations();
+  input.focus();
+});
+
+modalDeleteConvo.addEventListener("click", (e) => {
+  if (e.target === modalDeleteConvo) {
+    modalDeleteConvo.hidden = true;
+    convoToDelete = null;
+  }
+});
 
 // ============================================================
 //  Documents
@@ -186,7 +354,6 @@ function renderDocsModalList() {
     row.appendChild(body);
     row.appendChild(actions);
 
-    // Clic sur la ligne = sélectionner / désélectionner
     row.addEventListener("click", () => {
       selectedDocId = selectedDocId === doc.id ? null : doc.id;
       renderDocsModalList();
@@ -273,11 +440,10 @@ modalDocs.addEventListener("click", (e) => {
   if (e.target === modalDocs) closeDocsModal();
 });
 
-// Le "+" du modal déclenche le même input que le menu "+"
 btnDocsAdd.addEventListener("click", () => fileInput.click());
 
 // ============================================================
-//  Menu popup "+" dans la barre d'input
+//  Menu popup "+"
 // ============================================================
 function openActionMenu() {
   actionMenu.hidden = false;
@@ -305,6 +471,7 @@ document.addEventListener("keydown", (e) => {
     if (!actionMenu.hidden) closeActionMenu();
     if (!modalDocs.hidden) closeDocsModal();
     if (!modalDelete.hidden) { modalDelete.hidden = true; docToDelete = null; }
+    if (!modalDeleteConvo.hidden) { modalDeleteConvo.hidden = true; convoToDelete = null; }
   }
 });
 
@@ -390,7 +557,7 @@ fileInput.addEventListener("change", async () => {
 });
 
 // ============================================================
-//  DELETE — Supprimer un document
+//  Suppression d'un document
 // ============================================================
 let docToDelete = null;
 
@@ -431,6 +598,8 @@ btnDeleteConfirm.addEventListener("click", async () => {
 
     await refreshDocuments();
 
+    // Ajoute un message système à la conversation active
+    const activeConvo = getActiveConversation();
     if (activeConvo) {
       const bubble = addMessage(
         "assistant",
@@ -453,14 +622,8 @@ modalDelete.addEventListener("click", (e) => {
 });
 
 // ============================================================
-//  Nouvelle conversation
+//  Toggle sidebar
 // ============================================================
-btnNewChat.addEventListener("click", () => {
-  activeConvo = createConversation();
-  renderMessages();
-  input.focus();
-});
-
 btnToggleSidebar.addEventListener("click", () => {
   sidebar.classList.toggle("collapsed");
 });
@@ -489,16 +652,27 @@ function addMessage(role, text = "", persist = true) {
   messagesEl.appendChild(wrapper);
   scrollToBottom();
 
-  if (persist && activeConvo) {
-    appendMessageToConvo({ role, text });
+  if (persist) {
+    const activeConvo = getActiveConversation();
+    if (activeConvo) {
+      appendMessageToConvo(activeConvo.id, { role, text });
+      renderConversations();
+    }
   }
 
   return bubble;
 }
 
+// ⚠️ Toujours relire activeConvo depuis localStorage
 function renderMessages() {
   messagesEl.innerHTML = "";
-  if (!activeConvo) return;
+  const activeConvo = getActiveConversation();
+  if (!activeConvo) {
+    console.warn("renderMessages : aucune conversation active");
+    return;
+  }
+  console.log(`renderMessages : ${activeConvo.messages.length} message(s) à afficher`);
+
   activeConvo.messages.forEach((m) => {
     const bubble = addMessage(m.role, m.text, false);
     if (m.role === "assistant" && (m.sources?.length || m.warning || m.mode)) {
@@ -630,6 +804,14 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
 
+  // Récupère la conversation active À JOUR
+  let activeConvo = getActiveConversation();
+  if (!activeConvo) {
+    createConversation();
+    activeConvo = getActiveConversation();
+  }
+
+  // Ajoute le message utilisateur
   addMessage("user", text);
   input.value = "";
   setLoading(true);
@@ -660,23 +842,32 @@ form.addEventListener("submit", async (event) => {
       mode: data.response_mode,
     });
 
-    appendMessageToConvo({
-      role: "assistant",
-      text: answerText,
-      sources: data.sources ?? [],
-      warning: data.warning ?? null,
-      mode: data.response_mode,
-    });
+    // Relit la conversation active APRÈS l'ajout du message user
+    const convoNow = getActiveConversation();
+    if (convoNow) {
+      appendMessageToConvo(convoNow.id, {
+        role: "assistant",
+        text: answerText,
+        sources: data.sources ?? [],
+        warning: data.warning ?? null,
+        mode: data.response_mode,
+      });
+      renderConversations();
+    }
 
     console.log("Mode   :", data.response_mode);
     console.log("Sources:", data.sources);
   } catch (err) {
     bubble.textContent = "❌ " + err.message;
     bubble.style.color = "#b91c1c";
-    appendMessageToConvo({
-      role: "assistant",
-      text: "❌ " + err.message,
-    });
+    const convoNow = getActiveConversation();
+    if (convoNow) {
+      appendMessageToConvo(convoNow.id, {
+        role: "assistant",
+        text: "❌ " + err.message,
+      });
+      renderConversations();
+    }
   } finally {
     setLoading(false);
     scrollToBottom();
@@ -686,6 +877,11 @@ form.addEventListener("submit", async (event) => {
 // ============================================================
 //  Init
 // ============================================================
+console.log("=== INIT ===");
+console.log("Conversations en storage :", loadConversations().length);
+console.log("Conversation active :", getActiveConvoId());
+
+renderConversations();
 renderMessages();
 refreshDocuments();
 input.focus();
