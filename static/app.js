@@ -1,57 +1,74 @@
 // ============================================================
 //  Configuration
-//  Backend FastAPI : /api/v1/questions et /api/v1/documents
-//  APP_API_KEY est vide dans .env → aucun header X-API-Key
 // ============================================================
 const API_URL = "/api/v1/questions";
 const DOCS_URL = "/api/v1/documents";
-const API_KEY = "";  // mettre la clé si APP_API_KEY est activée plus tard
+const API_KEY = "";
 
 // ============================================================
-//  Historique des conversations (local au navigateur)
+//  Icônes SVG
 // ============================================================
-const CONVOS_KEY = "vodacom_conversations";
-const ACTIVE_CONVO_KEY = "vodacom_active_convo";
+const ICONS = {
+  file: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+    <polyline points="14 2 14 8 20 8"/>
+  </svg>`,
 
-function loadConversations() {
-  try { return JSON.parse(localStorage.getItem(CONVOS_KEY)) || []; }
-  catch { return []; }
+  trash: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="3 6 5 6 21 6"/>
+    <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+    <path d="M10 11v6M14 11v6"/>
+    <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+  </svg>`,
+
+  copy: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+    <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+  </svg>`,
+
+  check: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+    <polyline points="20 6 9 17 4 12"/>
+  </svg>`,
+
+  link: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/>
+    <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>
+  </svg>`,
+};
+
+// ============================================================
+//  Conversation active (une seule, garde le titre auto)
+// ============================================================
+const CONVO_KEY = "vodacom_convo";
+
+function loadConversation() {
+  try { return JSON.parse(localStorage.getItem(CONVO_KEY)) || null; }
+  catch { return null; }
 }
-function saveConversations(c) { localStorage.setItem(CONVOS_KEY, JSON.stringify(c)); }
-function getActiveConvoId() { return localStorage.getItem(ACTIVE_CONVO_KEY); }
-function setActiveConvoId(id) { localStorage.setItem(ACTIVE_CONVO_KEY, id); }
+function saveConversation(c) { localStorage.setItem(CONVO_KEY, JSON.stringify(c)); }
 
 function createConversation() {
-  const id = "convo-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now();
   const convo = {
-    id,
+    id: "convo-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now(),
     title: "Nouvelle conversation",
     messages: [],
     created_at: Date.now(),
     updated_at: Date.now(),
   };
-  const convos = loadConversations();
-  convos.unshift(convo);
-  saveConversations(convos);
-  setActiveConvoId(id);
+  saveConversation(convo);
   return convo;
 }
 
-function getActiveConversation() {
-  return loadConversations().find((c) => c.id === getActiveConvoId()) || null;
+function appendMessageToConvo(message) {
+  const convo = loadConversation();
+  if (!convo) return;
+  convo.messages.push({ ...message, ts: Date.now() });
+  convo.updated_at = Date.now();
+  saveConversation(convo);
 }
 
-function appendMessageToConvo(id, message) {
-  const convos = loadConversations();
-  const idx = convos.findIndex((c) => c.id === id);
-  if (idx === -1) return;
-  convos[idx].messages.push({ ...message, ts: Date.now() });
-  convos[idx].updated_at = Date.now();
-  if (message.role === "user" && convos[idx].title === "Nouvelle conversation") {
-    convos[idx].title = message.text.slice(0, 40) + (message.text.length > 40 ? "…" : "");
-  }
-  saveConversations(convos);
-}
+let activeConvo = loadConversation();
+if (!activeConvo) activeConvo = createConversation();
 
 // ============================================================
 //  DOM
@@ -60,29 +77,37 @@ const messagesEl = document.getElementById("messages");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("user-input");
 const sendBtn = form.querySelector("button[type='submit']");
-const conversationsEl = document.getElementById("conversations");
 const btnNewChat = document.getElementById("btn-new-chat");
 const sidebar = document.getElementById("sidebar");
 const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
-const documentsEl = document.getElementById("documents");
-const btnUpload = document.getElementById("btn-upload");
+
+const btnOpenDocs = document.getElementById("btn-open-docs");
+const docsCount = document.getElementById("docs-count");
+
+const modalDocs = document.getElementById("modal-docs");
+const docsList = document.getElementById("docs-list");
+const btnDocsAdd = document.getElementById("btn-docs-add");
+const btnDocsClose = document.getElementById("btn-docs-close");
+
+const btnPlus = document.getElementById("btn-plus");
+const actionMenu = document.getElementById("action-menu");
+const btnAddFile = document.getElementById("btn-add-file");
 const fileInput = document.getElementById("file-input");
 
-const modalReplace = document.getElementById("modal-replace");
+const modalFormat = document.getElementById("modal-format");
+const modalToolarge = document.getElementById("modal-toolarge");
+const formatFileName = document.getElementById("format-file-name");
+const toolargeFileName = document.getElementById("toolarge-file-name");
+const btnFormatOk = document.getElementById("btn-format-ok");
+const btnToolargeOk = document.getElementById("btn-toolarge-ok");
+
 const modalDelete = document.getElementById("modal-delete");
-const replaceDocName = document.getElementById("replace-doc-name");
 const deleteDocName = document.getElementById("delete-doc-name");
-const btnReplacePick = document.getElementById("btn-replace-pick");
-const btnReplaceCancel = document.getElementById("btn-replace-cancel");
 const btnDeleteCancel = document.getElementById("btn-delete-cancel");
 const btnDeleteConfirm = document.getElementById("btn-delete-confirm");
-const replaceFileInput = document.getElementById("replace-file-input");
-
-let activeConvo = getActiveConversation();
-if (!activeConvo) activeConvo = createConversation();
 
 // ============================================================
-//  Helpers HTTP
+//  Helpers
 // ============================================================
 function authHeaders(extra = {}) {
   const h = { ...extra };
@@ -101,88 +126,78 @@ async function extractError(res) {
 }
 
 // ============================================================
-//  Documents (sidebar)
+//  Documents
 // ============================================================
 let selectedDocId = null;
 let documentsCache = [];
-const docDetailsCache = new Map();
 
-function renderDocuments() {
-  documentsEl.innerHTML = "";
+function updateDocsCount() {
+  docsCount.textContent = documentsCache.length;
+}
+
+function renderDocsModalList() {
+  docsList.innerHTML = "";
 
   if (documentsCache.length === 0) {
     const empty = document.createElement("div");
-    empty.className = "documents-empty";
+    empty.className = "docs-empty";
     empty.textContent = "Aucun document indexé";
-    documentsEl.appendChild(empty);
+    docsList.appendChild(empty);
     return;
   }
 
   documentsCache.forEach((doc) => {
-    const item = document.createElement("div");
-    item.className = "document-item" + (doc.id === selectedDocId ? " selected" : "");
-    item.title = `${doc.filename} — ${doc.page_count} page(s)`;
-
-    item.addEventListener("mouseenter", async () => {
-      const detail = await fetchDocumentDetail(doc.id);
-      if (detail) {
-        const uploaded = detail.uploaded_at?.replace("T", " ").slice(0, 16) ?? "?";
-        item.title =
-          `${detail.filename}\n` +
-          `${detail.page_count} page(s) · ${detail.chunk_count} chunk(s)\n` +
-          `Version ${detail.version} · uploadé le ${uploaded}\n` +
-          `SHA-256 : ${detail.sha256.slice(0, 16)}…`;
-      }
-    });
+    const row = document.createElement("div");
+    row.className = "doc-row";
 
     const icon = document.createElement("span");
-    icon.className = "doc-icon";
-    icon.textContent = "📄";
+    icon.className = "doc-row-icon";
+    icon.innerHTML = ICONS.file;
 
-    const name = document.createElement("span");
-    name.className = "doc-name";
+    const body = document.createElement("div");
+    body.className = "doc-row-body";
+
+    const name = document.createElement("div");
+    name.className = "doc-row-name";
     name.textContent = doc.filename;
+    name.title = doc.filename;
 
-    const pages = document.createElement("span");
-    pages.className = "doc-pages";
-    pages.textContent = `${doc.page_count}p`;
+    const meta = document.createElement("div");
+    meta.className = "doc-row-meta";
+    meta.textContent = `${doc.page_count} page(s) · ${doc.chunk_count} chunk(s)`;
+
+    body.appendChild(name);
+    body.appendChild(meta);
 
     const actions = document.createElement("div");
-    actions.className = "doc-actions";
+    actions.className = "doc-row-actions";
 
-    const btnReplace = document.createElement("button");
-    btnReplace.className = "doc-action-btn";
-    btnReplace.title = "Remplacer ce PDF";
-    btnReplace.textContent = "↻";
-    btnReplace.addEventListener("click", (e) => {
-      e.stopPropagation();
-      openReplaceModal(doc);
-    });
-
-    const btnDelete = document.createElement("button");
-    btnDelete.className = "doc-action-btn danger";
-    btnDelete.title = "Supprimer ce PDF";
-    btnDelete.textContent = "✕";
-    btnDelete.addEventListener("click", (e) => {
+    const btnTrash = document.createElement("button");
+    btnTrash.className = "doc-row-btn danger";
+    btnTrash.title = "Supprimer ce PDF";
+    btnTrash.innerHTML = ICONS.trash;
+    btnTrash.addEventListener("click", (e) => {
       e.stopPropagation();
       openDeleteModal(doc);
     });
+    actions.appendChild(btnTrash);
 
-    actions.appendChild(btnReplace);
-    actions.appendChild(btnDelete);
+    row.appendChild(icon);
+    row.appendChild(body);
+    row.appendChild(actions);
 
-    item.appendChild(icon);
-    item.appendChild(name);
-    item.appendChild(pages);
-    item.appendChild(actions);
-
-    item.addEventListener("click", () => {
+    // Clic sur la ligne = sélectionner / désélectionner
+    row.addEventListener("click", () => {
       selectedDocId = selectedDocId === doc.id ? null : doc.id;
-      renderDocuments();
+      renderDocsModalList();
       renderScopeBar();
     });
 
-    documentsEl.appendChild(item);
+    if (doc.id === selectedDocId) {
+      row.style.background = "var(--primary-soft)";
+    }
+
+    docsList.appendChild(row);
   });
 }
 
@@ -204,13 +219,13 @@ function renderScopeBar() {
   bar.innerHTML = "";
   const chip = document.createElement("span");
   chip.className = "scope-chip";
-  chip.textContent = `📄 ${label}`;
+  chip.innerHTML = ICONS.file + `<span>${label}</span>`;
   const clear = document.createElement("button");
   clear.className = "scope-clear";
   clear.textContent = "Tout interroger";
   clear.addEventListener("click", () => {
     selectedDocId = null;
-    renderDocuments();
+    renderDocsModalList();
     renderScopeBar();
   });
   bar.appendChild(chip);
@@ -226,53 +241,123 @@ async function refreshDocuments() {
     if (selectedDocId && !documentsCache.some((d) => d.id === selectedDocId)) {
       selectedDocId = null;
     }
-    renderDocuments();
+    updateDocsCount();
+    renderDocsModalList();
     renderScopeBar();
   } catch (err) {
     console.warn("Impossible de charger les documents :", err);
-    documentsEl.innerHTML = "";
+    documentsCache = [];
+    updateDocsCount();
+    docsList.innerHTML = "";
     const empty = document.createElement("div");
-    empty.className = "documents-empty";
+    empty.className = "docs-empty";
     empty.textContent = "Erreur de chargement";
-    documentsEl.appendChild(empty);
+    docsList.appendChild(empty);
   }
 }
 
-// ---------- GET /api/v1/documents/{id} ----------
-async function fetchDocumentDetail(docId) {
-  if (docDetailsCache.has(docId)) return docDetailsCache.get(docId);
-  try {
-    const res = await fetch(`${DOCS_URL}/${docId}`, { headers: authHeaders() });
-    if (!res.ok) return null;
-    const data = await res.json();
-    docDetailsCache.set(docId, data);
-    return data;
-  } catch {
-    return null;
-  }
+// ============================================================
+//  Modal Documents
+// ============================================================
+function openDocsModal() {
+  renderDocsModalList();
+  modalDocs.hidden = false;
+}
+function closeDocsModal() {
+  modalDocs.hidden = true;
 }
 
-// ---------- POST /api/v1/documents (upload) ----------
-btnUpload.addEventListener("click", () => fileInput.click());
+btnOpenDocs.addEventListener("click", openDocsModal);
+btnDocsClose.addEventListener("click", closeDocsModal);
+modalDocs.addEventListener("click", (e) => {
+  if (e.target === modalDocs) closeDocsModal();
+});
 
+// Le "+" du modal déclenche le même input que le menu "+"
+btnDocsAdd.addEventListener("click", () => fileInput.click());
+
+// ============================================================
+//  Menu popup "+" dans la barre d'input
+// ============================================================
+function openActionMenu() {
+  actionMenu.hidden = false;
+  btnPlus.classList.add("active");
+}
+function closeActionMenu() {
+  actionMenu.hidden = true;
+  btnPlus.classList.remove("active");
+}
+
+btnPlus.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (actionMenu.hidden) openActionMenu();
+  else closeActionMenu();
+});
+
+document.addEventListener("click", (e) => {
+  if (!actionMenu.hidden && !actionMenu.contains(e.target) && e.target !== btnPlus) {
+    closeActionMenu();
+  }
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    if (!actionMenu.hidden) closeActionMenu();
+    if (!modalDocs.hidden) closeDocsModal();
+    if (!modalDelete.hidden) { modalDelete.hidden = true; docToDelete = null; }
+  }
+});
+
+btnAddFile.addEventListener("click", () => {
+  closeActionMenu();
+  fileInput.click();
+});
+
+// ============================================================
+//  Popups format / taille
+// ============================================================
+function showFormatPopup(filename) {
+  formatFileName.textContent = filename;
+  modalFormat.hidden = false;
+}
+btnFormatOk.addEventListener("click", () => { modalFormat.hidden = true; });
+modalFormat.addEventListener("click", (e) => {
+  if (e.target === modalFormat) modalFormat.hidden = true;
+});
+
+function showTooLargePopup(filename) {
+  toolargeFileName.textContent = filename;
+  modalToolarge.hidden = false;
+}
+btnToolargeOk.addEventListener("click", () => { modalToolarge.hidden = true; });
+modalToolarge.addEventListener("click", (e) => {
+  if (e.target === modalToolarge) modalToolarge.hidden = true;
+});
+
+// ============================================================
+//  Upload
+// ============================================================
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
   if (!file) return;
 
   if (!file.name.toLowerCase().endsWith(".pdf")) {
-    alert("Seuls les fichiers .pdf sont acceptés.");
+    showFormatPopup(file.name);
     fileInput.value = "";
     return;
   }
   if (file.size > 10 * 1024 * 1024) {
-    alert("Fichier trop volumineux (10 Mo maximum).");
+    showTooLargePopup(file.name);
     fileInput.value = "";
     return;
   }
 
-  btnUpload.disabled = true;
-  const original = btnUpload.innerHTML;
-  btnUpload.innerHTML = "…";
+  btnPlus.disabled = true;
+  btnDocsAdd.disabled = true;
+  const originalPlus = btnPlus.innerHTML;
+  const originalAdd = btnDocsAdd.innerHTML;
+  btnPlus.textContent = "…";
+  btnDocsAdd.textContent = "…";
 
   try {
     const formData = new FormData();
@@ -291,101 +376,21 @@ fileInput.addEventListener("change", async () => {
 
     await refreshDocuments();
     selectedDocId = doc.id;
-    renderDocuments();
+    renderDocsModalList();
     renderScopeBar();
   } catch (err) {
     alert("❌ Erreur upload : " + err.message);
   } finally {
-    btnUpload.disabled = false;
-    btnUpload.innerHTML = original;
+    btnPlus.disabled = false;
+    btnDocsAdd.disabled = false;
+    btnPlus.innerHTML = originalPlus;
+    btnDocsAdd.innerHTML = originalAdd;
     fileInput.value = "";
   }
 });
 
 // ============================================================
-//  PUT /api/v1/documents/{id} — Remplacer un PDF
-// ============================================================
-let docToReplace = null;
-
-function openReplaceModal(doc) {
-  docToReplace = doc;
-  replaceDocName.textContent = doc.filename;
-  modalReplace.hidden = false;
-}
-
-btnReplaceCancel.addEventListener("click", () => {
-  modalReplace.hidden = true;
-  docToReplace = null;
-});
-
-btnReplacePick.addEventListener("click", () => replaceFileInput.click());
-
-replaceFileInput.addEventListener("change", async () => {
-  const file = replaceFileInput.files[0];
-  if (!file || !docToReplace) return;
-
-  if (!file.name.toLowerCase().endsWith(".pdf")) {
-    alert("Seuls les fichiers .pdf sont acceptés.");
-    replaceFileInput.value = "";
-    return;
-  }
-  if (file.size > 10 * 1024 * 1024) {
-    alert("Fichier trop volumineux (10 Mo maximum).");
-    replaceFileInput.value = "";
-    return;
-  }
-
-  btnReplacePick.disabled = true;
-  const original = btnReplacePick.textContent;
-  btnReplacePick.textContent = "Remplacement…";
-
-  const targetId = docToReplace.id;
-
-  try {
-    const formData = new FormData();
-    formData.append("file", file, file.name);
-
-    const res = await fetch(`${DOCS_URL}/${targetId}`, {
-      method: "PUT",
-      headers: authHeaders(),
-      body: formData,
-    });
-
-    if (!res.ok) throw new Error(await extractError(res));
-
-    const updated = await res.json();
-    console.log("Document remplacé :", updated);
-
-    modalReplace.hidden = true;
-    docToReplace = null;
-
-    docDetailsCache.delete(targetId);
-
-    await refreshDocuments();
-    selectedDocId = targetId;
-    renderDocuments();
-    renderScopeBar();
-
-    if (activeConvo) {
-      const bubble = addMessage(
-        "assistant",
-        `📄 Le document « ${updated.filename} » a été remplacé (version ${updated.version}).`,
-        true
-      );
-      bubble.style.fontStyle = "italic";
-      bubble.style.color = "var(--text-muted)";
-    }
-  } catch (err) {
-    alert("❌ Erreur remplacement : " + err.message);
-  } finally {
-    btnReplacePick.disabled = false;
-    btnReplacePick.textContent = original;
-    replaceFileInput.value = "";
-  }
-});
-
-// ============================================================
-//  DELETE /api/v1/documents/{id} — Supprimer un PDF
+//  DELETE — Supprimer un document
 // ============================================================
 let docToDelete = null;
 
@@ -423,14 +428,13 @@ btnDeleteConfirm.addEventListener("click", async () => {
     docToDelete = null;
 
     if (selectedDocId === target.id) selectedDocId = null;
-    docDetailsCache.delete(target.id);
 
     await refreshDocuments();
 
     if (activeConvo) {
       const bubble = addMessage(
         "assistant",
-        `🗑️ Le document « ${target.filename} » a été supprimé.`,
+        `Le document « ${target.filename} » a été supprimé.`,
         true
       );
       bubble.style.fontStyle = "italic";
@@ -444,75 +448,16 @@ btnDeleteConfirm.addEventListener("click", async () => {
   }
 });
 
-// Fermer les modales en cliquant sur le fond
-modalReplace.addEventListener("click", (e) => {
-  if (e.target === modalReplace) { modalReplace.hidden = true; docToReplace = null; }
-});
 modalDelete.addEventListener("click", (e) => {
   if (e.target === modalDelete) { modalDelete.hidden = true; docToDelete = null; }
 });
 
 // ============================================================
-//  Sidebar : historique des conversations
+//  Nouvelle conversation
 // ============================================================
-function renderConversations() {
-  const convos = loadConversations();
-  conversationsEl.innerHTML = "";
-
-  if (convos.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "conversation-item";
-    empty.style.color = "var(--text-muted)";
-    empty.style.cursor = "default";
-    empty.textContent = "Aucune conversation";
-    conversationsEl.appendChild(empty);
-    return;
-  }
-
-  const activeId = getActiveConvoId();
-  convos.forEach((c) => {
-    const item = document.createElement("div");
-    item.className = "conversation-item" + (c.id === activeId ? " active" : "");
-
-    const dot = document.createElement("span");
-    dot.className = "dot";
-
-    const label = document.createElement("span");
-    label.className = "label";
-    label.textContent = c.title;
-
-    item.appendChild(dot);
-    item.appendChild(label);
-    item.addEventListener("click", () => switchConversation(c.id));
-    conversationsEl.appendChild(item);
-  });
-}
-
-function renderMessages(convo) {
-  messagesEl.innerHTML = "";
-  if (!convo) return;
-  convo.messages.forEach((m) => {
-    const bubble = addMessage(m.role, m.text, false);
-    if (m.sources?.length) renderSources(bubble, m.sources);
-    if (m.warning) renderWarning(bubble, m.warning);
-    if (m.mode === "no_evidence") {
-      bubble.style.fontStyle = "italic";
-      bubble.style.color = "var(--text-muted)";
-    }
-  });
-}
-
-function switchConversation(id) {
-  setActiveConvoId(id);
-  activeConvo = getActiveConversation();
-  renderMessages(activeConvo);
-  renderConversations();
-}
-
 btnNewChat.addEventListener("click", () => {
   activeConvo = createConversation();
-  renderMessages(activeConvo);
-  renderConversations();
+  renderMessages();
   input.focus();
 });
 
@@ -545,42 +490,129 @@ function addMessage(role, text = "", persist = true) {
   scrollToBottom();
 
   if (persist && activeConvo) {
-    appendMessageToConvo(activeConvo.id, { role, text });
-    renderConversations();
+    appendMessageToConvo({ role, text });
   }
 
   return bubble;
 }
 
-function renderSources(bubble, sources) {
-  const list = document.createElement("div");
-  list.className = "sources";
-  list.style.marginTop = "12px";
-  list.style.paddingTop = "10px";
-  list.style.borderTop = "1px solid var(--border)";
-  list.style.fontSize = "12px";
-  list.style.color = "var(--text-muted)";
-
-  sources.forEach((s) => {
-    const line = document.createElement("div");
-    line.style.marginBottom = "6px";
-    const pages = s.page_end && s.page_end !== s.page
-      ? `pages ${s.page}-${s.page_end}`
-      : `page ${s.page}`;
-    line.innerHTML = `<strong>[${s.reference}]</strong> ${s.filename} — ${pages}`;
-    list.appendChild(line);
+function renderMessages() {
+  messagesEl.innerHTML = "";
+  if (!activeConvo) return;
+  activeConvo.messages.forEach((m) => {
+    const bubble = addMessage(m.role, m.text, false);
+    if (m.role === "assistant" && (m.sources?.length || m.warning || m.mode)) {
+      attachAssistantActions(bubble, m);
+    }
   });
-
-  bubble.appendChild(list);
 }
 
-function renderWarning(bubble, warning) {
-  const warn = document.createElement("div");
-  warn.style.marginTop = "8px";
-  warn.style.fontSize = "12px";
-  warn.style.color = "#b45309";
-  warn.textContent = "⚠️ " + warning;
-  bubble.appendChild(warn);
+// ============================================================
+//  Actions sous les réponses assistant
+// ============================================================
+function attachAssistantActions(bubble, { text, sources = [], warning = null, mode = null }) {
+  if (mode === "no_evidence") {
+    bubble.style.fontStyle = "italic";
+    bubble.style.color = "var(--text-muted)";
+  }
+
+  let sourcesBlock = null;
+  if (Array.isArray(sources) && sources.length > 0) {
+    sourcesBlock = document.createElement("div");
+    sourcesBlock.className = "msg-sources";
+    sourcesBlock.hidden = true;
+
+    sources.forEach((s) => {
+      const line = document.createElement("div");
+      line.className = "msg-source-line";
+
+      const ref = document.createElement("span");
+      ref.className = "msg-source-ref";
+      ref.textContent = `[${s.reference}]`;
+
+      const meta = document.createElement("div");
+      meta.className = "msg-source-meta";
+
+      const file = document.createElement("div");
+      file.className = "msg-source-file";
+      file.textContent = s.filename;
+
+      const page = document.createElement("div");
+      page.className = "msg-source-page";
+      page.textContent = s.page_end && s.page_end !== s.page
+        ? `pages ${s.page}–${s.page_end} · score ${s.score}`
+        : `page ${s.page} · score ${s.score}`;
+
+      meta.appendChild(file);
+      meta.appendChild(page);
+
+      if (s.excerpt) {
+        const excerpt = document.createElement("div");
+        excerpt.className = "msg-source-excerpt";
+        excerpt.textContent = s.excerpt;
+        meta.appendChild(excerpt);
+      }
+
+      line.appendChild(ref);
+      line.appendChild(meta);
+      sourcesBlock.appendChild(line);
+    });
+
+    bubble.appendChild(sourcesBlock);
+  }
+
+  if (warning) {
+    const warn = document.createElement("div");
+    warn.style.marginTop = "8px";
+    warn.style.fontSize = "12px";
+    warn.style.color = "#b45309";
+    warn.textContent = "⚠ " + warning;
+    bubble.appendChild(warn);
+  }
+
+  if (!text) return;
+
+  const actions = document.createElement("div");
+  actions.className = "message-actions";
+
+  const btnCopy = document.createElement("button");
+  btnCopy.type = "button";
+  btnCopy.className = "msg-action-btn";
+  btnCopy.innerHTML = `${ICONS.copy}<span>Copier</span>`;
+
+  btnCopy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      btnCopy.classList.add("copied");
+      btnCopy.innerHTML = `${ICONS.check}<span>Copié</span>`;
+      setTimeout(() => {
+        btnCopy.classList.remove("copied");
+        btnCopy.innerHTML = `${ICONS.copy}<span>Copier</span>`;
+      }, 1600);
+    } catch (err) {
+      alert("Impossible de copier : " + err.message);
+    }
+  });
+
+  actions.appendChild(btnCopy);
+
+  if (sourcesBlock) {
+    const btnRefs = document.createElement("button");
+    btnRefs.type = "button";
+    btnRefs.className = "msg-action-btn";
+    const count = sources.length;
+    const label = count === 1 ? "référence" : "références";
+    btnRefs.innerHTML = `${ICONS.link}<span>${count} ${label}</span>`;
+
+    btnRefs.addEventListener("click", () => {
+      sourcesBlock.hidden = !sourcesBlock.hidden;
+      btnRefs.classList.toggle("active", !sourcesBlock.hidden);
+    });
+
+    actions.appendChild(btnRefs);
+  }
+
+  bubble.appendChild(actions);
 }
 
 function setLoading(loading) {
@@ -618,23 +650,19 @@ form.addEventListener("submit", async (event) => {
     if (!res.ok) throw new Error(await extractError(res));
 
     const data = await res.json();
+    const answerText = data.answer ?? "(réponse vide)";
+    bubble.textContent = answerText;
 
-    bubble.textContent = data.answer ?? "(réponse vide)";
+    attachAssistantActions(bubble, {
+      text: answerText,
+      sources: data.sources ?? [],
+      warning: data.warning ?? null,
+      mode: data.response_mode,
+    });
 
-    if (Array.isArray(data.sources) && data.sources.length > 0) {
-      renderSources(bubble, data.sources);
-    }
-    if (data.warning) {
-      renderWarning(bubble, data.warning);
-    }
-    if (data.response_mode === "no_evidence") {
-      bubble.style.fontStyle = "italic";
-      bubble.style.color = "var(--text-muted)";
-    }
-
-    appendMessageToConvo(activeConvo.id, {
+    appendMessageToConvo({
       role: "assistant",
-      text: data.answer ?? "",
+      text: answerText,
       sources: data.sources ?? [],
       warning: data.warning ?? null,
       mode: data.response_mode,
@@ -645,7 +673,7 @@ form.addEventListener("submit", async (event) => {
   } catch (err) {
     bubble.textContent = "❌ " + err.message;
     bubble.style.color = "#b91c1c";
-    appendMessageToConvo(activeConvo.id, {
+    appendMessageToConvo({
       role: "assistant",
       text: "❌ " + err.message,
     });
@@ -658,7 +686,6 @@ form.addEventListener("submit", async (event) => {
 // ============================================================
 //  Init
 // ============================================================
-renderConversations();
-renderMessages(activeConvo);
+renderMessages();
 refreshDocuments();
 input.focus();

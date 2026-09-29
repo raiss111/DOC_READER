@@ -12,22 +12,35 @@
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <button class="btn-new-chat" id="btn-new-chat">
-                    <span>+</span> Nouvelle conversation
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"/>
+                        <line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    Nouvelle conversation
                 </button>
             </div>
 
-            <div class="sidebar-section-title">Documents</div>
-            <nav class="documents" id="documents"></nav>
+            <div class="sidebar-spacer"></div>
 
-            <div class="sidebar-section-title">Historique</div>
-            <nav class="conversations" id="conversations"></nav>
+            <!-- Section Documents (en bas) -->
+            <div class="sidebar-footer">
+                <button class="sidebar-docs-btn" id="btn-open-docs">
+                    <span class="sidebar-docs-icon">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                        </svg>
+                    </span>
+                    <span class="sidebar-docs-label">Documents</span>
+                    <span class="sidebar-docs-count" id="docs-count">0</span>
+                </button>
+            </div>
         </aside>
 
         <!-- ZONE PRINCIPALE -->
         <main class="main">
             <header>
                 <button class="btn-toggle-sidebar" id="btn-toggle-sidebar" aria-label="Menu">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="3" y1="6" x2="21" y2="6"/>
                         <line x1="3" y1="12" x2="21" y2="12"/>
                         <line x1="3" y1="18" x2="21" y2="18"/>
@@ -44,18 +57,35 @@
                 <div class="messages" id="messages"></div>
                 <div class="input-wrap">
                     <form class="input-bar" id="chat-form">
-                        <!-- Bouton d'upload : à gauche, dans la barre -->
-                        <button type="button" class="btn-input-action" id="btn-upload" title="Ajouter un PDF" aria-label="Ajouter un PDF">
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 16.49a2 2 0 0 1-2.83-2.83l8.49-8.49"/>
-                            </svg>
-                        </button>
+                        <div class="input-action-wrap">
+                            <button type="button" class="btn-input-action" id="btn-plus" title="Ajouter" aria-label="Ajouter">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <line x1="12" y1="5" x2="12" y2="19"/>
+                                    <line x1="5" y1="12" x2="19" y2="12"/>
+                                </svg>
+                            </button>
+                            <div class="action-menu" id="action-menu" hidden>
+                                <button type="button" class="action-menu-item" id="btn-add-file">
+                                    <span class="action-menu-icon">
+                                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66L9.64 16.49a2 2 0 0 1-2.83-2.83l8.49-8.49"/>
+                                        </svg>
+                                    </span>
+                                    <span>Ajouter un fichier</span>
+                                </button>
+                            </div>
+                        </div>
+
                         <input type="file" id="file-input" accept="application/pdf,.pdf" hidden>
 
                         <input type="text" name="message" id="user-input" placeholder="Écris un message..." autocomplete="off" required>
 
-                        <!-- Bouton d'envoi : à droite -->
-                        <button type="submit" class="btn-input-send" aria-label="Envoyer">↑</button>
+                        <button type="submit" class="btn-input-send" aria-label="Envoyer">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                                <line x1="12" y1="19" x2="12" y2="5"/>
+                                <polyline points="5 12 12 5 19 12"/>
+                            </svg>
+                        </button>
                     </form>
                     <div class="hint">Vodacom AI peut faire des erreurs. Vérifiez les infos importantes.</div>
                 </div>
@@ -63,20 +93,60 @@
         </main>
     </div>
 
-    <!-- Modale : remplacer un PDF -->
-    <div class="modal-backdrop" id="modal-replace" hidden>
-        <div class="modal">
-            <div class="modal-title">Remplacer le document</div>
+    <!-- MODAL : liste des documents -->
+    <div class="modal-backdrop" id="modal-docs" hidden>
+        <div class="modal modal-docs">
+            <div class="modal-header">
+                <div class="modal-title">Documents</div>
+                <div class="modal-header-actions">
+                    <button class="modal-header-btn" id="btn-docs-add" title="Ajouter un PDF" aria-label="Ajouter">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"/>
+                            <line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                    </button>
+                    <button class="modal-header-btn" id="btn-docs-close" title="Fermer" aria-label="Fermer">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="18" y1="6" x2="6" y2="18"/>
+                            <line x1="6" y1="6" x2="18" y2="18"/>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="modal-body modal-body-scroll">
+                <div class="docs-list" id="docs-list"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Popup : format non supporté -->
+    <div class="modal-backdrop" id="modal-format" hidden>
+        <div class="modal modal-small">
+            <div class="modal-title">Format non supporté</div>
             <div class="modal-body">
-                <p id="replace-doc-name" class="modal-doc-name"></p>
-                <p class="modal-hint">Le nouveau PDF remplacera le contenu indexé. L'ID et l'historique du document sont conservés.</p>
-                <button class="btn-modal-primary" id="btn-replace-pick">
-                    Choisir un nouveau PDF
-                </button>
-                <input type="file" id="replace-file-input" accept="application/pdf,.pdf" hidden>
+                <p class="modal-hint">
+                    Seuls les fichiers <strong>PDF</strong> sont pris en compte.
+                    Le fichier <span id="format-file-name" class="modal-file-name"></span> a été ignoré.
+                </p>
             </div>
             <div class="modal-actions">
-                <button class="btn-modal-cancel" id="btn-replace-cancel">Annuler</button>
+                <button class="btn-modal-primary" id="btn-format-ok">Compris</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Popup : fichier trop volumineux -->
+    <div class="modal-backdrop" id="modal-toolarge" hidden>
+        <div class="modal modal-small">
+            <div class="modal-title">Fichier trop volumineux</div>
+            <div class="modal-body">
+                <p class="modal-hint">
+                    Le fichier <span id="toolarge-file-name" class="modal-file-name"></span>
+                    dépasse la taille maximale autorisée (<strong>10 Mo</strong>).
+                </p>
+            </div>
+            <div class="modal-actions">
+                <button class="btn-modal-primary" id="btn-toolarge-ok">Compris</button>
             </div>
         </div>
     </div>
