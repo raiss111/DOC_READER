@@ -1,8 +1,10 @@
 // ============================================================
 //  Configuration
+//  Frontend v4 — utilise les conversations du backend
 // ============================================================
-const API_URL = "/api/v1/questions";
-const DOCS_URL = "/api/v1/documents";
+const API_URL = "/api/v1";
+const DOCS_URL = `${API_URL}/documents`;
+const CONVOS_URL = `${API_URL}/conversations`;
 const API_KEY = "";
 
 // ============================================================
@@ -42,94 +44,13 @@ const ICONS = {
 };
 
 // ============================================================
-//  Gestion multi-conversations (100% frontend)
+//  État global (en mémoire)
 // ============================================================
-const CONVOS_KEY = "vodacom_conversations";
-const ACTIVE_CONVO_KEY = "vodacom_active_convo";
-
-function loadConversations() {
-  try { return JSON.parse(localStorage.getItem(CONVOS_KEY)) || []; }
-  catch { return []; }
-}
-
-function saveConversations(convos) {
-  try {
-    localStorage.setItem(CONVOS_KEY, JSON.stringify(convos));
-  } catch (e) {
-    console.error("saveConversations failed:", e);
-  }
-}
-
-function getActiveConvoId() {
-  return localStorage.getItem(ACTIVE_CONVO_KEY);
-}
-
-function setActiveConvoId(id) {
-  localStorage.setItem(ACTIVE_CONVO_KEY, id);
-}
-
-function createConversation() {
-  const id = "convo-" + Math.random().toString(36).slice(2, 10) + "-" + Date.now();
-  const convo = {
-    id,
-    title: "Nouvelle conversation",
-    messages: [],
-    created_at: Date.now(),
-    updated_at: Date.now(),
-  };
-  const convos = loadConversations();
-  convos.unshift(convo);
-  saveConversations(convos);
-  setActiveConvoId(id);
-  return convo;
-}
-
-// ⚠️ Toujours relire depuis localStorage : évite la désynchronisation
-function getActiveConversation() {
-  const id = getActiveConvoId();
-  const convos = loadConversations();
-  return convos.find((c) => c.id === id) || null;
-}
-
-function appendMessageToConvo(id, message) {
-  const convos = loadConversations();
-  const idx = convos.findIndex((c) => c.id === id);
-  if (idx === -1) {
-    console.warn("appendMessageToConvo : conversation introuvable", id);
-    return;
-  }
-  convos[idx].messages = convos[idx].messages || [];
-  convos[idx].messages.push({ ...message, ts: Date.now() });
-  convos[idx].updated_at = Date.now();
-
-  // Titre auto à partir du premier message utilisateur
-  if (message.role === "user" && convos[idx].title === "Nouvelle conversation") {
-    convos[idx].title = message.text.slice(0, 40) + (message.text.length > 40 ? "…" : "");
-  }
-  saveConversations(convos);
-}
-
-function deleteConversation(id) {
-  let convos = loadConversations();
-  convos = convos.filter((c) => c.id !== id);
-  saveConversations(convos);
-  if (getActiveConvoId() === id) {
-    if (convos.length > 0) {
-      setActiveConvoId(convos[0].id);
-    } else {
-      // Crée une nouvelle conversation si toutes supprimées
-      createConversation();
-    }
-  }
-}
-
-// Initialisation : charge ou crée la conversation active
-(function initActiveConvo() {
-  let convo = getActiveConversation();
-  if (!convo) {
-    convo = createConversation();
-  }
-})();
+let currentConvoId = null;      // id de la conversation active (côté serveur)
+let currentConvo = null;        // objet complet { id, title, document_ids, message_count, ... }
+let conversationsCache = [];    // liste des conversations du serveur
+let documentsCache = [];        // liste des documents du serveur
+let selectedDocId = null;       // restriction éventuelle à un document
 
 // ============================================================
 //  DOM
@@ -174,7 +95,7 @@ const btnDeleteConvoCancel = document.getElementById("btn-delete-convo-cancel");
 const btnDeleteConvoConfirm = document.getElementById("btn-delete-convo-confirm");
 
 // ============================================================
-//  Helpers
+//  Helpers HTTP
 // ============================================================
 function authHeaders(extra = {}) {
   const h = { ...extra };
@@ -192,25 +113,191 @@ async function extractError(res) {
   return detail;
 }
 
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  if (!res.ok && res.status !== 204) {
+    const err = new Error(await extractError(res));
+    err.status = res.status;
+    err.response = res;
+    throw err;
+  }
+  return res;
+}
+
 // ============================================================
-//  Sidebar : liste des conversations
+//  Initialisation
+// ============================================================
+async function init() {
+  console.log("=== INIT v4 (conversations serveur) ===");
+  try {
+    await Promise.all([refreshDocuments(), refreshConversations()]);
+
+    // Choisit la première conversation existante ou en crée une
+    if (conversationsCache.length > 0) {
+      await selectConversation(conversationsCache[0].id);
+    } else {
+      // Si aucun document, on ne peut pas encore créer de conversation.
+      // On prépare juste une conversation "vide" jusqu'à ce qu'un PDF soit uploadé.
+      if (documentsCache.length === 0) {
+        renderMessagesEmpty();
+        renderConversations();
+      } else {
+        await createNewConversation();
+      }
+    }
+  } catch (err) {
+    console.error("Init error:", err);
+  } finally {
+    input.focus();
+  }
+}
+
+function renderMessagesEmpty() {
+  messagesEl.innerHTML = "";
+  const hint = document.createElement("div");
+  hint.style.textAlign = "center";
+  hint.style.color = "var(--text-muted)";
+  hint.style.padding = "40px 20px";
+  hint.style.fontSize = "14px";
+  hint.textContent = "Ajoutez un PDF pour commencer.";
+  messagesEl.appendChild(hint);
+}
+
+// ============================================================
+//  Conversations — API
+// ============================================================
+async function refreshConversations() {
+  try {
+    const res = await apiFetch(`${CONVOS_URL}?limit=100`, { headers: authHeaders() });
+    const data = await res.json();
+    conversationsCache = data.items || [];
+    renderConversations();
+  } catch (err) {
+    console.warn("Erreur de chargement des conversations :", err);
+    conversationsEl.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "conversations-error";
+    empty.textContent = "Erreur de chargement";
+    conversationsEl.appendChild(empty);
+  }
+}
+
+async function createNewConversation() {
+  // Il faut au moins un document côté serveur pour créer une conversation.
+  if (documentsCache.length === 0) {
+    alert("Ajoutez d'abord au moins un PDF.");
+    return;
+  }
+  try {
+    // Option B1 : on attache tous les documents disponibles à la conversation.
+    const allDocIds = documentsCache.map((d) => d.id);
+    const res = await apiFetch(CONVOS_URL, {
+      method: "POST",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        title: "Nouvelle conversation",
+        document_ids: allDocIds,
+      }),
+    });
+    const convo = await res.json();
+    console.log("Conversation créée :", convo);
+
+    conversationsCache.unshift(convo);
+    currentConvo = convo;
+    currentConvoId = convo.id;
+    renderMessagesEmpty();
+    renderConversations();
+    input.focus();
+  } catch (err) {
+    console.error("Création conversation :", err);
+    alert("❌ Impossible de créer la conversation : " + err.message);
+  }
+}
+
+async function selectConversation(id) {
+  try {
+    // 1) Récupérer la conversation complète
+    const resConvo = await apiFetch(`${CONVOS_URL}/${id}`, { headers: authHeaders() });
+    currentConvo = await resConvo.json();
+    currentConvoId = currentConvo.id;
+
+    // 2) Charger les messages
+    const resMsgs = await apiFetch(
+      `${CONVOS_URL}/${id}/messages?limit=100`,
+      { headers: authHeaders() }
+    );
+    const dataMsgs = await resMsgs.json();
+
+    renderMessages(dataMsgs.items || []);
+    renderConversations();
+    input.focus();
+  } catch (err) {
+    console.error("Sélection conversation :", err);
+    alert("❌ Impossible de charger la conversation : " + err.message);
+  }
+}
+
+async function deleteConversation(id) {
+  try {
+    await apiFetch(`${CONVOS_URL}/${id}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
+    conversationsCache = conversationsCache.filter((c) => c.id !== id);
+    if (currentConvoId === id) {
+      currentConvoId = null;
+      currentConvo = null;
+      // Bascule sur la première disponible, sinon affiche l'état vide
+      if (conversationsCache.length > 0) {
+        await selectConversation(conversationsCache[0].id);
+      } else {
+        renderMessagesEmpty();
+        renderConversations();
+      }
+    } else {
+      renderConversations();
+    }
+  } catch (err) {
+    alert("❌ Erreur suppression conversation : " + err.message);
+  }
+}
+
+async function renameConversation(id, newTitle) {
+  try {
+    const res = await apiFetch(`${CONVOS_URL}/${id}`, {
+      method: "PATCH",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ title: newTitle }),
+    });
+    const updated = await res.json();
+    const idx = conversationsCache.findIndex((c) => c.id === id);
+    if (idx !== -1) conversationsCache[idx] = updated;
+    if (currentConvoId === id) currentConvo = updated;
+    renderConversations();
+  } catch (err) {
+    console.warn("Renommage conversation :", err);
+  }
+}
+
+// ============================================================
+//  Sidebar : rendu des conversations
 // ============================================================
 function renderConversations() {
-  const convos = loadConversations();
   conversationsEl.innerHTML = "";
 
-  if (convos.length === 0) {
+  if (conversationsCache.length === 0) {
     const empty = document.createElement("div");
     empty.className = "conversations-empty";
-    empty.textContent = "Aucune conversation";
+    empty.textContent = documentsCache.length === 0
+      ? "Ajoutez un PDF pour commencer"
+      : "Aucune conversation";
     conversationsEl.appendChild(empty);
     return;
   }
 
-  const activeId = getActiveConvoId();
-  convos.forEach((c) => {
+  conversationsCache.forEach((c) => {
     const item = document.createElement("div");
-    item.className = "convo-item" + (c.id === activeId ? " active" : "");
+    item.className = "convo-item" + (c.id === currentConvoId ? " active" : "");
     item.title = c.title;
 
     const dot = document.createElement("span");
@@ -237,27 +324,19 @@ function renderConversations() {
     item.appendChild(label);
     item.appendChild(actions);
 
-    item.addEventListener("click", () => switchConversation(c.id));
+    item.addEventListener("click", () => {
+      if (c.id !== currentConvoId) selectConversation(c.id);
+    });
 
     conversationsEl.appendChild(item);
   });
 }
 
-function switchConversation(id) {
-  setActiveConvoId(id);
-  renderMessages();       // relit activeConvo depuis localStorage
-  renderConversations();
-  input.focus();
-}
-
 // ============================================================
-//  Nouvelle conversation
+//  Bouton "Nouvelle conversation"
 // ============================================================
 btnNewChat.addEventListener("click", () => {
-  createConversation();
-  renderMessages();
-  renderConversations();
-  input.focus();
+  createNewConversation();
 });
 
 // ============================================================
@@ -276,14 +355,12 @@ btnDeleteConvoCancel.addEventListener("click", () => {
   convoToDelete = null;
 });
 
-btnDeleteConvoConfirm.addEventListener("click", () => {
+btnDeleteConvoConfirm.addEventListener("click", async () => {
   if (!convoToDelete) return;
-  deleteConversation(convoToDelete.id);
+  const target = convoToDelete;
   convoToDelete = null;
   modalDeleteConvo.hidden = true;
-  renderMessages();
-  renderConversations();
-  input.focus();
+  await deleteConversation(target.id);
 });
 
 modalDeleteConvo.addEventListener("click", (e) => {
@@ -294,13 +371,33 @@ modalDeleteConvo.addEventListener("click", (e) => {
 });
 
 // ============================================================
-//  Documents
+//  Documents — API
 // ============================================================
-let selectedDocId = null;
-let documentsCache = [];
-
 function updateDocsCount() {
   docsCount.textContent = documentsCache.length;
+}
+
+async function refreshDocuments() {
+  try {
+    const res = await apiFetch(`${DOCS_URL}?limit=100`, { headers: authHeaders() });
+    const data = await res.json();
+    documentsCache = data.items || [];
+    if (selectedDocId && !documentsCache.some((d) => d.id === selectedDocId)) {
+      selectedDocId = null;
+    }
+    updateDocsCount();
+    renderDocsModalList();
+    renderScopeBar();
+  } catch (err) {
+    console.warn("Erreur de chargement des documents :", err);
+    documentsCache = [];
+    updateDocsCount();
+    docsList.innerHTML = "";
+    const empty = document.createElement("div");
+    empty.className = "docs-empty";
+    empty.textContent = "Erreur de chargement";
+    docsList.appendChild(empty);
+  }
 }
 
 function renderDocsModalList() {
@@ -399,30 +496,6 @@ function renderScopeBar() {
   bar.appendChild(clear);
 }
 
-async function refreshDocuments() {
-  try {
-    const res = await fetch(`${DOCS_URL}?limit=50`, { headers: authHeaders() });
-    if (!res.ok) throw new Error(await extractError(res));
-    const data = await res.json();
-    documentsCache = data.items || [];
-    if (selectedDocId && !documentsCache.some((d) => d.id === selectedDocId)) {
-      selectedDocId = null;
-    }
-    updateDocsCount();
-    renderDocsModalList();
-    renderScopeBar();
-  } catch (err) {
-    console.warn("Impossible de charger les documents :", err);
-    documentsCache = [];
-    updateDocsCount();
-    docsList.innerHTML = "";
-    const empty = document.createElement("div");
-    empty.className = "docs-empty";
-    empty.textContent = "Erreur de chargement";
-    docsList.appendChild(empty);
-  }
-}
-
 // ============================================================
 //  Modal Documents
 // ============================================================
@@ -502,7 +575,7 @@ modalToolarge.addEventListener("click", (e) => {
 });
 
 // ============================================================
-//  Upload
+//  Upload d'un document
 // ============================================================
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
@@ -513,7 +586,8 @@ fileInput.addEventListener("change", async () => {
     fileInput.value = "";
     return;
   }
-  if (file.size > 10 * 1024 * 1024) {
+  // Limite alignée sur MAX_PDF_BYTES=30 Mo du backend v4
+  if (file.size > 30 * 1024 * 1024) {
     showTooLargePopup(file.name);
     fileInput.value = "";
     return;
@@ -536,6 +610,22 @@ fileInput.addEventListener("change", async () => {
       body: formData,
     });
 
+    if (res.status === 409) {
+      // Doublon : on récupère l'ID existant et on le sélectionne
+      const payload = await res.json();
+      console.warn("Doublon détecté :", payload);
+      await refreshDocuments();
+      if (payload.existing_document_id) {
+        selectedDocId = payload.existing_document_id;
+        renderDocsModalList();
+        renderScopeBar();
+        alert("Ce PDF existe déjà dans la bibliothèque. Il a été sélectionné.");
+      } else {
+        alert("Ce PDF existe déjà dans la bibliothèque.");
+      }
+      return;
+    }
+
     if (!res.ok) throw new Error(await extractError(res));
 
     const doc = await res.json();
@@ -545,6 +635,11 @@ fileInput.addEventListener("change", async () => {
     selectedDocId = doc.id;
     renderDocsModalList();
     renderScopeBar();
+
+    // Si aucune conversation n'existe encore, on en crée une
+    if (!currentConvoId && conversationsCache.length === 0) {
+      await createNewConversation();
+    }
   } catch (err) {
     alert("❌ Erreur upload : " + err.message);
   } finally {
@@ -580,16 +675,10 @@ btnDeleteConfirm.addEventListener("click", async () => {
   btnDeleteConfirm.textContent = "Suppression…";
 
   try {
-    const res = await fetch(`${DOCS_URL}/${target.id}`, {
+    await apiFetch(`${DOCS_URL}/${target.id}`, {
       method: "DELETE",
       headers: authHeaders(),
     });
-
-    if (!res.ok && res.status !== 204) {
-      throw new Error(await extractError(res));
-    }
-
-    console.log("Document supprimé :", target.id);
 
     modalDelete.hidden = true;
     docToDelete = null;
@@ -597,18 +686,17 @@ btnDeleteConfirm.addEventListener("click", async () => {
     if (selectedDocId === target.id) selectedDocId = null;
 
     await refreshDocuments();
+    await refreshConversations();
 
-    // Ajoute un message système à la conversation active
-    const activeConvo = getActiveConversation();
-    if (activeConvo) {
-      const bubble = addMessage(
-        "assistant",
-        `Le document « ${target.filename} » a été supprimé.`,
-        true
+    // Si la conversation courante n'a plus de documents côté serveur,
+    // le backend refusera la question suivante. On avertit.
+    if (currentConvo && currentConvo.document_ids) {
+      currentConvo.document_ids = currentConvo.document_ids.filter(
+        (id) => id !== target.id
       );
-      bubble.style.fontStyle = "italic";
-      bubble.style.color = "var(--text-muted)";
     }
+
+    appendSystemMessage(`Le document « ${target.filename} » a été supprimé.`);
   } catch (err) {
     alert("❌ Erreur suppression : " + err.message);
   } finally {
@@ -629,11 +717,11 @@ btnToggleSidebar.addEventListener("click", () => {
 });
 
 // ============================================================
-//  Messages
+//  Messages — rendu
 // ============================================================
 function scrollToBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
 
-function addMessage(role, text = "", persist = true) {
+function addMessage(role, text = "", options = {}) {
   const wrapper = document.createElement("div");
   wrapper.className = `message ${role}`;
 
@@ -648,48 +736,60 @@ function addMessage(role, text = "", persist = true) {
   bubble.className = "bubble";
   bubble.textContent = text;
 
+  if (options.mode === "source_quote") {
+    bubble.classList.add("source-quote");
+  }
+  if (options.mode === "no_evidence") {
+    bubble.style.fontStyle = "italic";
+    bubble.style.color = "var(--text-muted)";
+  }
+
   wrapper.appendChild(bubble);
   messagesEl.appendChild(wrapper);
   scrollToBottom();
 
-  if (persist) {
-    const activeConvo = getActiveConversation();
-    if (activeConvo) {
-      appendMessageToConvo(activeConvo.id, { role, text });
-      renderConversations();
-    }
+  if (role === "assistant") {
+    attachAssistantActions(bubble, {
+      text,
+      sources: options.sources || [],
+      warning: options.warning || null,
+      mode: options.mode || null,
+    });
   }
 
   return bubble;
 }
 
-// ⚠️ Toujours relire activeConvo depuis localStorage
-function renderMessages() {
+function appendSystemMessage(text) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "message system";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  wrapper.appendChild(bubble);
+  messagesEl.appendChild(wrapper);
+  scrollToBottom();
+}
+
+// Affiche les messages d'une conversation (chargés depuis /messages)
+function renderMessages(messages) {
   messagesEl.innerHTML = "";
-  const activeConvo = getActiveConversation();
-  if (!activeConvo) {
-    console.warn("renderMessages : aucune conversation active");
+  if (!messages || messages.length === 0) {
     return;
   }
-  console.log(`renderMessages : ${activeConvo.messages.length} message(s) à afficher`);
-
-  activeConvo.messages.forEach((m) => {
-    const bubble = addMessage(m.role, m.text, false);
-    if (m.role === "assistant" && (m.sources?.length || m.warning || m.mode)) {
-      attachAssistantActions(bubble, m);
-    }
+  messages.forEach((m) => {
+    addMessage(m.role, m.content, {
+      mode: m.response_mode || null,
+      sources: m.sources || [],
+      warning: null, // pas stocké côté serveur
+    });
   });
 }
 
 // ============================================================
-//  Actions sous les réponses assistant
+//  Actions sous les réponses assistant (copier + références)
 // ============================================================
 function attachAssistantActions(bubble, { text, sources = [], warning = null, mode = null }) {
-  if (mode === "no_evidence") {
-    bubble.style.fontStyle = "italic";
-    bubble.style.color = "var(--text-muted)";
-  }
-
   let sourcesBlock = null;
   if (Array.isArray(sources) && sources.length > 0) {
     sourcesBlock = document.createElement("div");
@@ -797,6 +897,7 @@ function setLoading(loading) {
 
 // ============================================================
 //  Envoi d'une question
+//  Utilise POST /api/v1/conversations/{id}/questions
 // ============================================================
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -804,70 +905,93 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
 
-  // Récupère la conversation active À JOUR
-  let activeConvo = getActiveConversation();
-  if (!activeConvo) {
-    createConversation();
-    activeConvo = getActiveConversation();
+  // 1) Il faut une conversation active
+  if (!currentConvoId) {
+    if (documentsCache.length === 0) {
+      alert("Ajoutez d'abord un PDF pour démarrer une conversation.");
+      return;
+    }
+    await createNewConversation();
+    if (!currentConvoId) return;
   }
 
-  // Ajoute le message utilisateur
+  // 2) Affiche immédiatement le message utilisateur (optimistic UI)
   addMessage("user", text);
   input.value = "";
   setLoading(true);
 
-  const bubble = addMessage("assistant", "…", false);
+  // 3) Placeholder assistant
+  const wrapper = document.createElement("div");
+  wrapper.className = "message assistant";
+  const avatar = document.createElement("div");
+  avatar.className = "avatar";
+  avatar.textContent = "V";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = "…";
+  wrapper.appendChild(avatar);
+  wrapper.appendChild(bubble);
+  messagesEl.appendChild(wrapper);
+  scrollToBottom();
 
   try {
-    const res = await fetch(API_URL, {
+    // 4) Appel au backend
+    const body = {
+      question: text,
+      top_k: 4,
+    };
+    // Optionnel : restreindre à un document choisi dans la sidebar
+    if (selectedDocId) {
+      body.document_ids = [selectedDocId];
+    }
+
+    const res = await fetch(`${CONVOS_URL}/${currentConvoId}/questions`, {
       method: "POST",
       headers: authHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify({
-        question: text,
-        document_ids: selectedDocId ? [selectedDocId] : null,
-        top_k: 4,
-      }),
+      body: JSON.stringify(body),
     });
 
     if (!res.ok) throw new Error(await extractError(res));
 
     const data = await res.json();
     const answerText = data.answer ?? "(réponse vide)";
-    bubble.textContent = answerText;
 
+    // 5) Remplit la bulle + ajoute les actions
+    bubble.textContent = answerText;
+    if (data.response_mode === "source_quote") {
+      bubble.classList.add("source-quote");
+    }
+    if (data.response_mode === "no_evidence") {
+      bubble.style.fontStyle = "italic";
+      bubble.style.color = "var(--text-muted)";
+    }
     attachAssistantActions(bubble, {
       text: answerText,
-      sources: data.sources ?? [],
-      warning: data.warning ?? null,
-      mode: data.response_mode,
+      sources: data.sources || [],
+      warning: data.warning || null,
+      mode: data.response_mode || null,
     });
 
-    // Relit la conversation active APRÈS l'ajout du message user
-    const convoNow = getActiveConversation();
-    if (convoNow) {
-      appendMessageToConvo(convoNow.id, {
-        role: "assistant",
-        text: answerText,
-        sources: data.sources ?? [],
-        warning: data.warning ?? null,
-        mode: data.response_mode,
-      });
-      renderConversations();
+    // 6) Mise à jour du titre auto (si c'était la 1ère question)
+    if (currentConvo && currentConvo.message_count === 0) {
+      const newTitle = text.slice(0, 40) + (text.length > 40 ? "…" : "");
+      await renameConversation(currentConvoId, newTitle);
     }
+
+    // 7) Rafraîchit les métadonnées de la conversation courante
+    try {
+      const resConvo = await apiFetch(`${CONVOS_URL}/${currentConvoId}`, { headers: authHeaders() });
+      currentConvo = await resConvo.json();
+      const idx = conversationsCache.findIndex((c) => c.id === currentConvoId);
+      if (idx !== -1) conversationsCache[idx] = currentConvo;
+      renderConversations();
+    } catch {}
 
     console.log("Mode   :", data.response_mode);
     console.log("Sources:", data.sources);
   } catch (err) {
     bubble.textContent = "❌ " + err.message;
     bubble.style.color = "#b91c1c";
-    const convoNow = getActiveConversation();
-    if (convoNow) {
-      appendMessageToConvo(convoNow.id, {
-        role: "assistant",
-        text: "❌ " + err.message,
-      });
-      renderConversations();
-    }
   } finally {
     setLoading(false);
     scrollToBottom();
@@ -875,13 +999,6 @@ form.addEventListener("submit", async (event) => {
 });
 
 // ============================================================
-//  Init
+//  Lancement
 // ============================================================
-console.log("=== INIT ===");
-console.log("Conversations en storage :", loadConversations().length);
-console.log("Conversation active :", getActiveConvoId());
-
-renderConversations();
-renderMessages();
-refreshDocuments();
-input.focus();
+init();

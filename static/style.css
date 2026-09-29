@@ -930,7 +930,62 @@ header {
 
 .btn-modal-danger:hover:not(:disabled) { background: var(--primary-hover); }
 .btn-modal-danger:disabled { opacity: 0.5; cursor: not-allowed; }
+/* ============================================================
+   MODE CITATION EXACTE (source_quote)
+   ============================================================ */
+.bubble.source-quote {
+  border-left: 3px solid var(--primary);
+  padding-left: 12px;
+  font-style: normal;
+}
 
+.bubble.source-quote::before {
+  content: "❝ ";
+  color: var(--primary);
+  font-weight: 700;
+}
+
+/* ============================================================
+   MESSAGE SYSTÈME (info locale, ex: doc supprimé)
+   ============================================================ */
+.message.system .bubble {
+  font-style: italic;
+  color: var(--text-muted);
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+/* ============================================================
+   SPINNER sur le bouton nouvelle conversation
+   ============================================================ */
+.btn-new-chat.loading svg {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ============================================================
+   ÉTAT VIDE CONVERSATIONS
+   ============================================================ */
+.conversations-empty {
+  padding: 16px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  font-style: italic;
+  text-align: center;
+}
+
+/* ============================================================
+   ERREUR DANS LA SIDEBAR
+   ============================================================ */
+.conversations-error {
+  padding: 12px;
+  font-size: 12px;
+  color: var(--primary);
+  text-align: center;
+}
 /* ============================================================
    RESPONSIVE
    ============================================================ */

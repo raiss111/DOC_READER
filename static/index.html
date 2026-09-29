@@ -10,7 +10,6 @@
     <div class="app">
         <!-- SIDEBAR -->
         <aside class="sidebar" id="sidebar">
-            <!-- En-tête : label + bouton + encadré -->
             <div class="sidebar-header">
                 <span class="sidebar-header-label">Nouvelle conversation</span>
                 <button class="btn-new-chat" id="btn-new-chat" title="Nouvelle conversation" aria-label="Nouvelle conversation">
@@ -21,10 +20,8 @@
                 </button>
             </div>
 
-            <!-- Liste des conversations -->
             <nav class="conversations" id="conversations"></nav>
 
-            <!-- Bas : Documents -->
             <div class="sidebar-footer">
                 <button class="sidebar-docs-btn" id="btn-open-docs">
                     <span class="sidebar-docs-icon">
@@ -144,7 +141,7 @@
             <div class="modal-body">
                 <p class="modal-hint">
                     Le fichier <span id="toolarge-file-name" class="modal-file-name"></span>
-                    dépasse la taille maximale autorisée (<strong>10 Mo</strong>).
+                    dépasse la taille maximale autorisée (<strong>30 Mo</strong>).
                 </p>
             </div>
             <div class="modal-actions">
@@ -174,7 +171,7 @@
             <div class="modal-title">Supprimer la conversation</div>
             <div class="modal-body">
                 <p id="delete-convo-name" class="modal-doc-name"></p>
-                <p class="modal-hint">Cette action supprime définitivement l'historique de cette conversation.</p>
+                <p class="modal-hint">Cette action supprime définitivement l'historique côté serveur.</p>
             </div>
             <div class="modal-actions">
                 <button class="btn-modal-cancel" id="btn-delete-convo-cancel">Annuler</button>
