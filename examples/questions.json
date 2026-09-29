@@ -1,0 +1,7 @@
+[
+  {"question": "Quel est le delai de declaration des marchandises ?", "expected": "guide_procedures.pdf, page 1, 15 jours ouvrables"},
+  {"question": "Quels documents doivent accompagner un dossier ?", "expected": "guide_procedures.pdf, page 2, facture commerciale et bon de transport"},
+  {"question": "Combien de temps dure la garantie ?", "expected": "conditions_transport.pdf, page 1, 30 jours calendaires"},
+  {"question": "Dans quelle devise se fait le paiement ?", "expected": "conditions_transport.pdf, page 2, USD"},
+  {"question": "Quelle couleur ont les girafes ?", "expected": "no_evidence"}
+]
