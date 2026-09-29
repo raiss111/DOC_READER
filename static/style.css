@@ -13,29 +13,46 @@
   --primary-hover: #c50000;
   --primary-soft: #fff0f0;
   --primary-soft-border: #ffd6d6;
+
+  /* Hauteur de sécurité pour barre des tâches Windows / dock macOS */
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+}
 
 body {
   background: var(--bg);
   color: var(--text);
   font-family: -apple-system, "Segoe UI", sans-serif;
-  height: 100vh;
+  height: 100dvh;              /* dynamic viewport height : s'adapte à la barre Windows */
+  min-height: 100vh;            /* fallback pour navigateurs anciens */
   overflow: hidden;
 }
 
 /* ============================================================
    LAYOUT
    ============================================================ */
-.app { display: flex; height: 100vh; width: 100vw; }
+.app {
+  display: flex;
+  height: 100dvh;              /* idem : prend la vraie hauteur visible */
+  min-height: 100vh;            /* fallback */
+  width: 100vw;
+  overflow: hidden;
+}
 
 .main {
   flex: 1;
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   background: var(--bg);
+  overflow: hidden;
 }
 
 /* ============================================================
@@ -48,6 +65,8 @@ body {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
+  height: 100%;                /* suit la hauteur du parent (.app) */
+  overflow: hidden;
   transition: margin-left 0.25s ease;
 }
 
@@ -56,6 +75,7 @@ body {
 .sidebar-header {
   padding: 16px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .btn-new-chat {
@@ -73,16 +93,20 @@ body {
   border-radius: 10px;
   cursor: pointer;
   transition: background 0.15s ease;
+  font-family: inherit;
 }
 
 .btn-new-chat:hover { background: var(--primary-hover); }
 
-.sidebar-spacer { flex: 1; }
+.sidebar-spacer { flex: 1; min-height: 0; }
 
 /* ---- Section Documents (en bas) ---- */
 .sidebar-footer {
   padding: 12px;
+  padding-bottom: calc(12px + var(--safe-bottom));  /* marge de sécurité */
   border-top: 1px solid var(--border);
+  flex-shrink: 0;                /* empêche l'écrasement par le spacer */
+  background: var(--bg-sidebar); /* au cas où le spacer pousse dessus */
 }
 
 .sidebar-docs-btn {
@@ -100,11 +124,10 @@ body {
   cursor: pointer;
   text-align: left;
   transition: background 0.12s ease;
+  font-family: inherit;
 }
 
-.sidebar-docs-btn:hover {
-  background: #ececec;
-}
+.sidebar-docs-btn:hover { background: #ececec; }
 
 .sidebar-docs-icon {
   display: inline-flex;
@@ -114,9 +137,7 @@ body {
   flex-shrink: 0;
 }
 
-.sidebar-docs-label {
-  flex: 1;
-}
+.sidebar-docs-label { flex: 1; }
 
 .sidebar-docs-count {
   display: inline-flex;
@@ -193,6 +214,7 @@ header {
   justify-content: flex-end;
   overflow: hidden;
   position: relative;
+  min-height: 0;
 }
 
 .chat:has(.messages:empty) { justify-content: center; }
@@ -241,6 +263,7 @@ header {
   cursor: pointer;
   font-size: 12px;
   text-decoration: underline;
+  font-family: inherit;
 }
 
 .messages {
@@ -253,6 +276,7 @@ header {
   max-width: 720px;
   width: 100%;
   margin: 0 auto;
+  min-height: 0;
 }
 
 .message { display: flex; gap: 12px; max-width: 100%; }
@@ -390,7 +414,8 @@ header {
   width: 100%;
   max-width: 680px;
   margin: 0 auto;
-  padding: 16px 20px 28px 20px;
+  padding: 16px 20px 20px 20px;
+  padding-bottom: calc(20px + var(--safe-bottom));
   flex-shrink: 0;
 }
 
@@ -404,6 +429,7 @@ header {
   box-shadow: 0 2px 6px rgba(0, 0, 0, 0.04);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
   position: relative;
+  background: var(--bg);
 }
 
 .input-bar:focus-within {
@@ -418,6 +444,7 @@ header {
   font-size: 15px;
   background: transparent;
   padding: 8px 4px;
+  font-family: inherit;
 }
 
 .input-action-wrap { position: relative; flex-shrink: 0; }
@@ -483,6 +510,7 @@ header {
   cursor: pointer;
   text-align: left;
   transition: background 0.12s ease, color 0.12s ease;
+  font-family: inherit;
 }
 
 .action-menu-item:hover {
@@ -539,6 +567,7 @@ header {
   justify-content: center;
   z-index: 200;
   padding: 20px;
+  padding-bottom: calc(20px + var(--safe-bottom));
 }
 
 .modal-backdrop[hidden] { display: none; }
@@ -550,6 +579,10 @@ header {
   max-width: 420px;
   padding: 22px;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.15);
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .modal.modal-small { max-width: 380px; }
@@ -557,9 +590,7 @@ header {
 .modal.modal-docs {
   max-width: 520px;
   padding: 0;
-  display: flex;
-  flex-direction: column;
-  max-height: 70vh;
+  max-height: min(70dvh, 600px);
 }
 
 .modal-header {
@@ -568,6 +599,7 @@ header {
   justify-content: space-between;
   padding: 18px 20px;
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 .modal-header .modal-title {
@@ -601,11 +633,6 @@ header {
   color: var(--primary);
 }
 
-.modal-header-btn.danger:hover {
-  background: var(--primary-soft);
-  color: var(--primary);
-}
-
 .modal-title {
   font-size: 17px;
   font-weight: 700;
@@ -619,6 +646,7 @@ header {
   flex: 1;
   padding: 10px 12px 16px;
   margin-bottom: 0;
+  min-height: 0;
 }
 
 /* ---- Liste des documents dans le modal ---- */
@@ -643,6 +671,7 @@ header {
   padding: 12px;
   border-radius: 10px;
   transition: background 0.12s ease;
+  cursor: pointer;
 }
 
 .doc-row:hover { background: var(--bg-soft); }
@@ -711,7 +740,7 @@ header {
   color: var(--primary);
 }
 
-/* ---- Anciens styles de modale (formats, tailles, suppression) ---- */
+/* ---- Modales classiques ---- */
 .modal-doc-name,
 .modal-file-name {
   font-family: ui-monospace, "SF Mono", Menlo, monospace;
@@ -739,6 +768,7 @@ header {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .btn-modal-primary {
@@ -752,6 +782,7 @@ header {
   font-weight: 600;
   cursor: pointer;
   transition: background 0.15s ease;
+  font-family: inherit;
 }
 
 .btn-modal-primary:hover:not(:disabled) { background: var(--primary-hover); }
@@ -767,6 +798,7 @@ header {
   background: transparent;
   color: var(--text);
   transition: background 0.12s ease;
+  font-family: inherit;
 }
 
 .btn-modal-cancel:hover { background: var(--bg-soft); }
@@ -788,7 +820,7 @@ header {
     position: fixed;
     top: 0;
     left: 0;
-    height: 100vh;
+    height: 100dvh;
     z-index: 100;
     box-shadow: 2px 0 12px rgba(0, 0, 0, 0.08);
   }
