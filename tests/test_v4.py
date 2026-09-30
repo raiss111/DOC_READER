@@ -245,3 +245,100 @@ def test_new_conversation_endpoints_require_shared_api_key(tmp_path):
         assert client.post(P + "/conversations", json={"title": "Privé"}).status_code == 401
         assert client.post(P + "/conversations", json={"title": "Privé"},
                            headers={"X-API-Key": "secret"}).status_code == 201
+
+
+def test_social_greeting_uses_llm_but_does_not_open_general_chat(tmp_path, monkeypatch):
+    settings = Settings(storage_dir=tmp_path / "social", llm_mode="openai_compatible", llm_api_key="fake")
+    original_post = httpx.Client.post
+    outbound = []
+
+    def fake_post(self, url, **kwargs):
+        if url.startswith(P):
+            return original_post(self, url, **kwargs)
+        outbound.append(kwargs["json"])
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": "Bonjour ! Je peux vous aider à comprendre les documents de cette conversation."
+        }}]}, request=httpx.Request("POST", url))
+
+    with TestClient(create_app(settings)) as client:
+        cid = client.post(P + "/conversations", json={"title": "Vide"}).json()["id"]
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        greeting = client.post(P + f"/conversations/{cid}/questions", json={"question": "Bonjour"})
+        assert greeting.status_code == 200
+        assert greeting.json()["response_mode"] == "llm_chat"
+        assert greeting.json()["sources"] == []
+        assert "documents" in outbound[-1]["messages"][0]["content"]
+        # A substantive question still cannot escape the document scope.
+        outside = client.post(P + f"/conversations/{cid}/questions", json={"question": "Quelle est la capitale du Japon ?"})
+        assert outside.status_code == 422
+
+
+def test_referential_followup_uses_previous_assistant_for_retrieval(tmp_path, monkeypatch):
+    settings = Settings(storage_dir=tmp_path / "referential", llm_mode="openai_compatible", llm_api_key="fake")
+    original_post = httpx.Client.post
+
+    def fake_post(self, url, **kwargs):
+        if url.startswith(P):
+            return original_post(self, url, **kwargs)
+        return httpx.Response(200, json={"choices": [{"message": {
+            "content": "Les étapes comprennent la problématique, l'hypothèse et la délimitation [1]."
+        }}]}, request=httpx.Request("POST", url))
+
+    with TestClient(create_app(settings)) as client:
+        pdf = upload(client, "methode.pdf", pdf_bytes(
+            "La recherche scientifique comporte plusieurs étapes. La problématique est le point de départ. "
+            "L'hypothèse joue un rôle central. La délimitation précise le champ de l'étude."
+        )).json()
+        cid = client.post(P + "/conversations", json={"document_ids": [pdf["id"]]}).json()["id"]
+        store = client.app.state.store
+        original_search = store.search_candidates
+        queries = []
+
+        def capture_search(question, document_ids, limit=300):
+            queries.append(question)
+            return original_search(question, document_ids, limit)
+
+        monkeypatch.setattr(store, "search_candidates", capture_search)
+        monkeypatch.setattr(httpx.Client, "post", fake_post)
+        first = client.post(P + f"/conversations/{cid}/questions", json={
+            "question": "Quelles sont les principales étapes de la recherche ?"
+        })
+        assert first.status_code == 200
+        second = client.post(P + f"/conversations/{cid}/questions", json={
+            "question": "Parmi ces étapes, lesquelles sont les plus importantes au début et pourquoi ?"
+        })
+        assert second.status_code == 200
+        assert "problématique" in queries[-1].casefold()
+        assert "hypothèse" in queries[-1].casefold()
+        assert "délimitation" in queries[-1].casefold()
+
+
+def test_priority_question_prefers_explicit_strength_wording():
+    from app.retrieval import Retriever
+
+    chunks = [
+        {"document_id": "A", "filename": "a.pdf", "sha256": "a", "page": 1, "ordinal": 0,
+         "content": "Les étapes importantes au début sont présentées dans ce chapitre.", "embedding_json": None},
+        {"document_id": "A", "filename": "a.pdf", "sha256": "a", "page": 2, "ordinal": 4,
+         "content": "La formulation du problème est une étape essentielle et le point de départ de la recherche.",
+         "embedding_json": None},
+    ]
+    hits = Retriever(Settings()).search(
+        "Quelles étapes sont les plus importantes au début ?", chunks, top_k=2
+    )
+    assert hits[0]["page"] == 2
+
+
+def test_followup_detection_does_not_capture_standalone_definition():
+    from app.retrieval import is_contextual_followup
+
+    assert is_contextual_followup("Parmi ces étapes, lesquelles sont prioritaires ?") is True
+    assert is_contextual_followup("Explique la quatrième.") is True
+    assert is_contextual_followup("Qu'est-ce qu'une hypothèse ?") is False
+
+
+def test_priority_detection_does_not_treat_ordinal_as_importance():
+    from app.retrieval import _asks_for_priority
+
+    assert _asks_for_priority("Quelles étapes sont les plus importantes au début ?") is True
+    assert _asks_for_priority("Quel est le premier chapitre ?") is False

@@ -53,6 +53,47 @@ def definition_subject(question: str) -> str | None:
     return None
 
 
+
+
+def is_contextual_followup(question: str) -> bool:
+    """Detect a follow-up whose meaning depends on the preceding exchange."""
+    normalized = _normalized_words(question)
+    if not normalized:
+        return False
+    markers = (
+        r"\bces\b", r"\bcette\b", r"\bceux\b", r"\bcelles?\b",
+        r"\bce (?:dernier|derniere|point|passage|document|chapitre|element|exemple)\b",
+        r"\bcelui(?: ci| la)?\b", r"\bcelle(?: ci| la)?\b", r"\bparmi\b",
+        r"\blesquels?\b", r"\blesquelles?\b", r"\bprecedent", r"\bplus haut\b",
+        r"\btu viens de\b", r"\bviens d en\b",
+        r"\b(?:le|la) (?:premier|premiere|deuxieme|second|seconde|troisieme|quatrieme|cinquieme)\b",
+    )
+    return any(re.search(pattern, normalized) for pattern in markers)
+
+
+def _priority_evidence_score(content: str) -> int:
+    """Score explicit source wording that supports importance/priority claims."""
+    normalized = _normalized_words(content)
+    cues = (
+        "point de depart", "premier pas", "etape essentielle", "assise centrale",
+        "role central", "joue un role central", "pivot", "indispensable",
+        "exigee dans toute recherche", "exige dans toute recherche",
+        "tres importante", "tres important", "particulierement importante",
+        "particulierement important", "fondamentale", "fondamental",
+        "essentielle", "essentiel", "necessaire", "important",
+    )
+    return sum(1 for cue in cues if cue in normalized)
+
+
+def _asks_for_priority(question: str) -> bool:
+    normalized = _normalized_words(question)
+    return bool(re.search(
+        r"\b(important|importante|importants|importantes|essentiel|essentielle|essentiels|"
+        r"essentielles|prioritaire|prioritaires|fondamental|fondamentale|fondamentaux|"
+        r"indispensable|indispensables)\b",
+        normalized,
+    ))
+
 def _contains_explicit_definition(content: str, subject: str) -> bool:
     """Prefer an explicit 'X est ...' definition over incidental mentions of X."""
     normalized = _normalized_words(content)
@@ -132,6 +173,12 @@ class Retriever:
             # follow-up sections repeat the topic many times and score higher.
             # Rerank without inventing a score or changing persistent chunks.
             ranked.sort(key=lambda hit: not _contains_explicit_definition(hit["content"], subject))
+
+        if _asks_for_priority(query):
+            # A request such as "les plus importantes" must be backed by explicit
+            # wording in the source, not by the LLM's intuition. Stable sorting
+            # preserves the retrieval score when two passages carry equal evidence.
+            ranked.sort(key=lambda hit: -_priority_evidence_score(hit["content"]))
 
         selected: list[dict] = []
         # Comparison / synthesis across several documents needs coverage when top_k allows it.

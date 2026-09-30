@@ -11,6 +11,19 @@ from .retrieval import definition_subject
 NO_EVIDENCE = "Je n'ai trouvé aucun passage pertinent dans les documents sélectionnés."
 
 
+def is_social_turn(text: str) -> bool:
+    """True only for a pure greeting/thanks/farewell, never for a real document question."""
+    normalized = re.sub(r"[^a-zàâäçéèêëîïôöùûü0-9'’ ]+", " ", text.casefold())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    patterns = (
+        r"^(bonjour|bonsoir|salut|hello|coucou)( (ça va|ca va|comment vas tu|comment allez vous))?$",
+        r"^(merci|merci beaucoup|je te remercie|je vous remercie)$",
+        r"^(au revoir|à bientôt|a bientot|bonne journée|bonne journee|bonne soirée|bonne soiree)$",
+        r"^(ça va|ca va|comment vas tu|comment allez vous)$",
+    )
+    return any(re.fullmatch(pattern, normalized) for pattern in patterns)
+
+
 def _direct_definition_quote(question: str, hits: list[dict]) -> tuple[str, int, int, str | None] | None:
     """Extract a direct definition verbatim when requested; never fabricate a quote.
 
@@ -79,6 +92,44 @@ class Answerer:
                else f"page {s['page']}") + ")" for s in sources
         )
 
+    def social_reply(self, message: str, history: list[dict] | None = None) -> dict:
+        """Handle courtesy turns without pretending that they are PDF evidence."""
+        fallback = (
+            "Bonjour ! Je suis prêt à vous aider à partir des documents de cette conversation. "
+            "Posez-moi une question sur leur contenu."
+        )
+        if self.settings.llm_mode == "extractive":
+            return {"answer": fallback, "response_mode": "chat_fallback", "sources": [], "warning": None}
+
+        system_prompt = (
+            "Tu es l'assistant d'une bibliothèque PDF. Réponds naturellement et brièvement à la "
+            "salutation, au remerciement ou à la formule de politesse de l'utilisateur. "
+            "Reste strictement dans ton rôle : tu aides à comprendre les documents sélectionnés. "
+            "N'introduis aucun fait, conseil ou sujet extérieur aux documents. Pour une simple "
+            "salutation, aucune citation n'est nécessaire. Invite simplement l'utilisateur à poser "
+            "une question sur les documents. Réponds en français, en une ou deux phrases."
+        )
+        headers = {"Content-Type": "application/json"}
+        if self.settings.llm_api_key:
+            headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+        try:
+            with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
+                response = client.post(
+                    self.settings.llm_base_url.rstrip("/") + "/chat/completions",
+                    headers=headers,
+                    json={"model": self.settings.llm_model, "temperature": 0,
+                          "messages": [{"role": "system", "content": system_prompt},
+                                       {"role": "user", "content": message}]},
+                )
+                response.raise_for_status()
+                answer = response.json()["choices"][0]["message"]["content"].strip()
+            if not answer:
+                raise ValueError("empty social reply")
+            return {"answer": answer, "response_mode": "llm_chat", "sources": [], "warning": None}
+        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, AttributeError):
+            return {"answer": fallback, "response_mode": "chat_fallback", "sources": [],
+                    "warning": "LLM indisponible : réponse conversationnelle locale."}
+
     def answer(self, question: str, hits: list[dict], *,
                answer_style: str = "synthese", include_excerpts: bool = True,
                history: list[dict] | None = None) -> dict:
@@ -130,6 +181,11 @@ class Answerer:
                 "Utilise aussi les explications situées après un changement de page dans un même extrait. "
                 "Si la question demande la structure ou des exemples, fournis seulement ceux qui "
                 "découlent clairement des passages. "
+                "Si la question demande quels éléments sont les plus importants, prioritaires ou essentiels, "
+                "ne crée pas de classement par intuition. Appuie chaque qualification sur des formulations "
+                "explicites des extraits (par exemple : point de départ, étape essentielle, pivot, rôle central, "
+                "exigé, indispensable). Si les extraits ne permettent pas un classement strict, dis-le et "
+                "présente séparément les éléments dont l'importance est explicitement établie. "
             )
         system_prompt = (
             "Tu réponds en français et UNIQUEMENT à partir des EXTRAITS fournis. "

@@ -13,10 +13,10 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.security import APIKeyHeader
 
-from .answering import Answerer
+from .answering import Answerer, is_social_turn
 from .config import Settings
 from .pdf_processing import InvalidPDF, extract_pdf
-from .retrieval import Retriever, tokenize
+from .retrieval import Retriever, is_contextual_followup, tokenize
 from .schemas import (
     AnswerOut, ConversationDocumentsIn, ConversationIn, ConversationList,
     ConversationOut, ConversationTitleIn, DocumentList, DocumentOut,
@@ -206,12 +206,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             missing = store.missing_document_ids(ids)
             if missing:
                 raise HTTPException(status_code=404, detail={"documents_introuvables": missing})
-        # Short follow-up: include previous user question for retrieval, but answer the CURRENT one.
+        # Courtesy turns are conversational, not retrieval failures. They must not
+        # become a backdoor for answering general-knowledge questions.
+        if is_social_turn(question):
+            return answerer.social_reply(question, history=history)
+
+        # Resolve follow-up references for RETRIEVAL only. The assistant answer is
+        # context, never documentary evidence; facts still have to come from hits.
         retrieval_question = question
-        if history and len(tokenize(question)) <= 5:
-            previous = next((r["content"] for r in reversed(history) if r["role"] == "user"), None)
-            if previous:
-                retrieval_question = previous[:550] + " " + question
+        if history:
+            previous_user = next((r["content"] for r in reversed(history) if r["role"] == "user"), None)
+            if is_contextual_followup(question):
+                previous_assistant = next((r["content"] for r in reversed(history) if r["role"] == "assistant"), None)
+                context_parts = [question]
+                # The referent usually lives in the previous assistant answer ("ces étapes",
+                # "la quatrième", etc.). Prefer it to the older user wording, which can
+                # accidentally re-trigger broad multi-document intent.
+                if previous_assistant:
+                    context_parts.append(previous_assistant[:900])
+                elif previous_user:
+                    context_parts.append(previous_user[:450])
+                retrieval_question = " ".join(context_parts)
+            elif len(tokenize(question)) <= 5 and previous_user:
+                # Preserve the V4 behavior for short standalone-looking relances.
+                retrieval_question = previous_user[:550] + " " + question
         try:
             if settings.retrieval_mode == "lexical":
                 candidates = store.search_candidates(retrieval_question, ids, limit=max(300, request.top_k * 60))
@@ -306,7 +324,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=422, detail={"documents_hors_conversation": excluded})
         else:
             ids = available
-        if not ids:
+        # A pure greeting/thanks is allowed even before documents are attached.
+        # Any substantive question remains scoped to at least one conversation document.
+        if not ids and not is_social_turn(request.question.strip()):
             raise HTTPException(status_code=422, detail="Associer au moins un document à la conversation.")
         history = store.message_history(conversation_id, limit=8)
         result = answer_question(request, ids, history)
