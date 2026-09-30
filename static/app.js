@@ -60,8 +60,6 @@ const form = document.getElementById("chat-form");
 const input = document.getElementById("user-input");
 const sendBtn = form.querySelector("button[type='submit']");
 const btnNewChat = document.getElementById("btn-new-chat");
-const sidebar = document.getElementById("sidebar");
-const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
 const conversationsEl = document.getElementById("conversations");
 
 const btnOpenDocs = document.getElementById("btn-open-docs");
@@ -125,6 +123,39 @@ async function apiFetch(url, options = {}) {
 }
 
 // ============================================================
+//  Styles des bulles selon le mode de réponse du backend
+//  Modes possibles :
+//    extractive, llm        → réponse standard
+//    source_quote           → citation exacte (bordure + guillemets)
+//    no_evidence            → italique gris
+//    chat_fallback, llm_chat → réponse conversationnelle, gris discret
+// ============================================================
+function applyBubbleStyles(bubble, mode) {
+  if (mode === "source_quote") {
+    bubble.classList.add("source-quote");
+  } else if (mode === "no_evidence") {
+    bubble.style.fontStyle = "italic";
+    bubble.style.color = "var(--text-muted)";
+  } else if (mode === "chat_fallback" || mode === "llm_chat") {
+    bubble.style.color = "var(--text-muted)";
+  }
+}
+
+function isChatTurn(mode) {
+  return mode === "chat_fallback" || mode === "llm_chat";
+}
+
+// ============================================================
+//  État vide des messages
+//  IMPORTANT : on ne met RIEN dans .messages pour laisser
+//  le CSS afficher automatiquement le greeting centré
+//  (.chat:has(.messages:empty) .greeting { display: block; })
+// ============================================================
+function renderMessagesEmpty() {
+  messagesEl.innerHTML = "";
+}
+
+// ============================================================
 //  Initialisation
 // ============================================================
 async function init() {
@@ -132,35 +163,18 @@ async function init() {
   try {
     await Promise.all([refreshDocuments(), refreshConversations()]);
 
-    // Choisit la première conversation existante ou en crée une
     if (conversationsCache.length > 0) {
       await selectConversation(conversationsCache[0].id);
     } else {
-      // Si aucun document, on ne peut pas encore créer de conversation.
-      // On prépare juste une conversation "vide" jusqu'à ce qu'un PDF soit uploadé.
-      if (documentsCache.length === 0) {
-        renderMessagesEmpty();
-        renderConversations();
-      } else {
-        await createNewConversation();
-      }
+      // Aucune conversation : on vide .messages → greeting centré
+      renderMessagesEmpty();
+      renderConversations();
     }
   } catch (err) {
     console.error("Init error:", err);
   } finally {
     input.focus();
   }
-}
-
-function renderMessagesEmpty() {
-  messagesEl.innerHTML = "";
-  const hint = document.createElement("div");
-  hint.style.textAlign = "center";
-  hint.style.color = "var(--text-muted)";
-  hint.style.padding = "40px 20px";
-  hint.style.fontSize = "14px";
-  hint.textContent = "Ajoutez un PDF pour commencer.";
-  messagesEl.appendChild(hint);
 }
 
 // ============================================================
@@ -183,13 +197,17 @@ async function refreshConversations() {
 }
 
 async function createNewConversation() {
-  // Il faut au moins un document côté serveur pour créer une conversation.
-  if (documentsCache.length === 0) {
-    alert("Ajoutez d'abord au moins un PDF.");
-    return;
+  // Réutilise la conversation active si elle est déjà vide
+  if (currentConvo && currentConvo.message_count === 0) {
+    console.log("Réutilisation de la conversation vide :", currentConvoId);
+    return currentConvo;
   }
+
+  // Feedback visuel
+  btnNewChat.disabled = true;
+  btnNewChat.classList.add("loading");
+
   try {
-    // Option B1 : on attache tous les documents disponibles à la conversation.
     const allDocIds = documentsCache.map((d) => d.id);
     const res = await apiFetch(CONVOS_URL, {
       method: "POST",
@@ -208,20 +226,23 @@ async function createNewConversation() {
     renderMessagesEmpty();
     renderConversations();
     input.focus();
+    return convo;
   } catch (err) {
     console.error("Création conversation :", err);
     alert("❌ Impossible de créer la conversation : " + err.message);
+    return null;
+  } finally {
+    btnNewChat.disabled = false;
+    btnNewChat.classList.remove("loading");
   }
 }
 
 async function selectConversation(id) {
   try {
-    // 1) Récupérer la conversation complète
     const resConvo = await apiFetch(`${CONVOS_URL}/${id}`, { headers: authHeaders() });
     currentConvo = await resConvo.json();
     currentConvoId = currentConvo.id;
 
-    // 2) Charger les messages
     const resMsgs = await apiFetch(
       `${CONVOS_URL}/${id}/messages?limit=100`,
       { headers: authHeaders() }
@@ -247,7 +268,6 @@ async function deleteConversation(id) {
     if (currentConvoId === id) {
       currentConvoId = null;
       currentConvo = null;
-      // Bascule sur la première disponible, sinon affiche l'état vide
       if (conversationsCache.length > 0) {
         await selectConversation(conversationsCache[0].id);
       } else {
@@ -586,7 +606,6 @@ fileInput.addEventListener("change", async () => {
     fileInput.value = "";
     return;
   }
-  // Limite alignée sur MAX_PDF_BYTES=30 Mo du backend v4
   if (file.size > 30 * 1024 * 1024) {
     showTooLargePopup(file.name);
     fileInput.value = "";
@@ -611,7 +630,6 @@ fileInput.addEventListener("change", async () => {
     });
 
     if (res.status === 409) {
-      // Doublon : on récupère l'ID existant et on le sélectionne
       const payload = await res.json();
       console.warn("Doublon détecté :", payload);
       await refreshDocuments();
@@ -636,7 +654,6 @@ fileInput.addEventListener("change", async () => {
     renderDocsModalList();
     renderScopeBar();
 
-    // Si aucune conversation n'existe encore, on en crée une
     if (!currentConvoId && conversationsCache.length === 0) {
       await createNewConversation();
     }
@@ -688,8 +705,6 @@ btnDeleteConfirm.addEventListener("click", async () => {
     await refreshDocuments();
     await refreshConversations();
 
-    // Si la conversation courante n'a plus de documents côté serveur,
-    // le backend refusera la question suivante. On avertit.
     if (currentConvo && currentConvo.document_ids) {
       currentConvo.document_ids = currentConvo.document_ids.filter(
         (id) => id !== target.id
@@ -707,13 +722,6 @@ btnDeleteConfirm.addEventListener("click", async () => {
 
 modalDelete.addEventListener("click", (e) => {
   if (e.target === modalDelete) { modalDelete.hidden = true; docToDelete = null; }
-});
-
-// ============================================================
-//  Toggle sidebar
-// ============================================================
-btnToggleSidebar.addEventListener("click", () => {
-  sidebar.classList.toggle("collapsed");
 });
 
 // ============================================================
@@ -736,13 +744,7 @@ function addMessage(role, text = "", options = {}) {
   bubble.className = "bubble";
   bubble.textContent = text;
 
-  if (options.mode === "source_quote") {
-    bubble.classList.add("source-quote");
-  }
-  if (options.mode === "no_evidence") {
-    bubble.style.fontStyle = "italic";
-    bubble.style.color = "var(--text-muted)";
-  }
+  applyBubbleStyles(bubble, options.mode || null);
 
   wrapper.appendChild(bubble);
   messagesEl.appendChild(wrapper);
@@ -771,7 +773,8 @@ function appendSystemMessage(text) {
   scrollToBottom();
 }
 
-// Affiche les messages d'une conversation (chargés depuis /messages)
+// Affiche les messages d'une conversation (chargés depuis /messages).
+// Si vide, on laisse .messages vide → le CSS affiche le greeting centré.
 function renderMessages(messages) {
   messagesEl.innerHTML = "";
   if (!messages || messages.length === 0) {
@@ -781,7 +784,7 @@ function renderMessages(messages) {
     addMessage(m.role, m.content, {
       mode: m.response_mode || null,
       sources: m.sources || [],
-      warning: null, // pas stocké côté serveur
+      warning: null,
     });
   });
 }
@@ -905,22 +908,19 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
 
-  // 1) Il faut une conversation active
+  // Le backend accepte les salutations même sans document attaché.
   if (!currentConvoId) {
-    if (documentsCache.length === 0) {
-      alert("Ajoutez d'abord un PDF pour démarrer une conversation.");
-      return;
-    }
-    await createNewConversation();
-    if (!currentConvoId) return;
+    const convo = await createNewConversation();
+    if (!convo) return;
   }
 
-  // 2) Affiche immédiatement le message utilisateur (optimistic UI)
+  // ✅ CAPTURE AVANT ENVOI : la conversation était-elle vide ?
+  const wasEmpty = currentConvo && currentConvo.message_count === 0;
+
   addMessage("user", text);
   input.value = "";
   setLoading(true);
 
-  // 3) Placeholder assistant
   const wrapper = document.createElement("div");
   wrapper.className = "message assistant";
   const avatar = document.createElement("div");
@@ -935,12 +935,10 @@ form.addEventListener("submit", async (event) => {
   scrollToBottom();
 
   try {
-    // 4) Appel au backend
     const body = {
       question: text,
       top_k: 4,
     };
-    // Optionnel : restreindre à un document choisi dans la sidebar
     if (selectedDocId) {
       body.document_ids = [selectedDocId];
     }
@@ -956,15 +954,9 @@ form.addEventListener("submit", async (event) => {
     const data = await res.json();
     const answerText = data.answer ?? "(réponse vide)";
 
-    // 5) Remplit la bulle + ajoute les actions
     bubble.textContent = answerText;
-    if (data.response_mode === "source_quote") {
-      bubble.classList.add("source-quote");
-    }
-    if (data.response_mode === "no_evidence") {
-      bubble.style.fontStyle = "italic";
-      bubble.style.color = "var(--text-muted)";
-    }
+    applyBubbleStyles(bubble, data.response_mode || null);
+
     attachAssistantActions(bubble, {
       text: answerText,
       sources: data.sources || [],
@@ -972,13 +964,14 @@ form.addEventListener("submit", async (event) => {
       mode: data.response_mode || null,
     });
 
-    // 6) Mise à jour du titre auto (si c'était la 1ère question)
-    if (currentConvo && currentConvo.message_count === 0) {
+    // ✅ Titre auto basé sur la valeur capturée AVANT l'envoi
+    //    On saute les simples salutations (chat_fallback, llm_chat)
+    if (wasEmpty && !isChatTurn(data.response_mode)) {
       const newTitle = text.slice(0, 40) + (text.length > 40 ? "…" : "");
       await renameConversation(currentConvoId, newTitle);
     }
 
-    // 7) Rafraîchit les métadonnées de la conversation courante
+    // Rafraîchit les métadonnées (message_count, updated_at)
     try {
       const resConvo = await apiFetch(`${CONVOS_URL}/${currentConvoId}`, { headers: authHeaders() });
       currentConvo = await resConvo.json();
