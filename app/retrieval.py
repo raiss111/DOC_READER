@@ -111,11 +111,14 @@ class Retriever:
         if not chunks:
             return []
         unique: list[dict] = []
-        fingerprints: set[str] = set()
+        fingerprints: set[tuple[str, str]] = set()
         for chunk in chunks:
             fingerprint = re.sub(r"\s+", " ", chunk["content"]).strip().casefold()
-            if fingerprint and fingerprint not in fingerprints:
-                fingerprints.add(fingerprint)
+            # Deduplicate repeated legacy uploads (same PDF SHA), but not a
+            # genuinely different PDF that happens to contain the same sentence.
+            key = (chunk.get("sha256", ""), fingerprint)
+            if fingerprint and key not in fingerprints:
+                fingerprints.add(key)
                 unique.append(chunk)
 
         if self.settings.retrieval_mode == "semantic":
@@ -131,9 +134,24 @@ class Retriever:
             ranked.sort(key=lambda hit: not _contains_explicit_definition(hit["content"], subject))
 
         selected: list[dict] = []
+        # Comparison / synthesis across several documents needs coverage when top_k allows it.
+        cross_document = re.search(
+            r"\b(compar|diff[eé]ren|similair|points? communs?|plusieurs documents|"
+            r"chaque document|selon ces|selon les documents)\w*",
+            query.casefold(),
+        ) is not None
+        if cross_document and top_k > 1:
+            covered: set[str] = set()
+            for hit in ranked:
+                if hit["document_id"] in covered:
+                    continue
+                covered.add(hit["document_id"])
+                selected.append(hit)
+                if len(selected) >= top_k:
+                    return selected
         for hit in ranked:
             # Consecutive overlapping windows do not constitute independent evidence.
-            if any(hit["document_id"] == prev["document_id"]
+            if hit in selected or any(hit["document_id"] == prev["document_id"]
                    and hit["page"] == prev["page"]
                    and abs(hit.get("ordinal", -10_000) - prev.get("ordinal", 10_000)) <= 2
                    for prev in selected):
@@ -176,16 +194,25 @@ class Retriever:
 
     @staticmethod
     def _bm25(query: str, chunks: list[dict], top_k: int) -> list[dict]:
-        terms = set(tokenize(query))
+        def root(term: str) -> str:
+            # Conservative plural normalization; FTS5 prefix candidates can match
+            # "paiement" with "paiements", so the reranker must do the same.
+            return term[:-1] if len(term) >= 5 and term.endswith("s") and not term.endswith(("ss", "us")) else term
+
+        terms = {root(term) for term in tokenize(query)}
         if not terms:
             return []
-        counts = [Counter(tokenize(c["content"])) for c in chunks]
+        counts = [Counter(root(word) for word in tokenize(c["content"])) for c in chunks]
         lengths = [sum(c.values()) for c in counts]
         avg_len = max(1.0, sum(lengths) / len(chunks))
         document_frequency = Counter(word for counter in counts for word in counter)
         scores = []
         n = len(chunks)
         for index, counter in enumerate(counts):
+            # With two substantive terms, a hit mentioning only one is too weak:
+            # "clause beta" must not claim that a paragraph about "clause alpha" is evidence.
+            if len(terms) == 2 and not terms.issubset(counter):
+                continue
             score = 0.0
             for word in terms:
                 f = counter.get(word, 0)

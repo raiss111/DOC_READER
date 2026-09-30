@@ -14,8 +14,8 @@ load_dotenv()
 class Settings:
     storage_dir: Path = Path("./data")
     app_api_key: str = ""
-    max_pdf_bytes: int = 10 * 1024 * 1024
-    max_pages: int = 200
+    max_pdf_bytes: int = 30 * 1024 * 1024
+    max_pages: int = 1000
     chunk_size: int = 950
     chunk_overlap: int = 150
     retrieval_mode: str = "lexical"  # lexical (offline) or semantic (optional ML extra)
@@ -24,7 +24,7 @@ class Settings:
     llm_mode: str = "extractive"  # extractive (offline) or openai_compatible
     llm_base_url: str = "https://api.groq.com/openai/v1"
     llm_api_key: str = ""
-    llm_model: str = "llama-3.3-70b-versatile"  # override with a currently supported model
+    llm_model: str = "qwen/qwen3.8-27b"  # override with a currently supported model
     llm_timeout_seconds: float = 25.0
 
     @classmethod
@@ -32,8 +32,8 @@ class Settings:
         return cls(
             storage_dir=Path(os.getenv("STORAGE_DIR", "./data")).expanduser().resolve(),
             app_api_key=os.getenv("APP_API_KEY", ""),
-            max_pdf_bytes=int(os.getenv("MAX_PDF_BYTES", str(10 * 1024 * 1024))),
-            max_pages=int(os.getenv("MAX_PAGES", "200")),
+            max_pdf_bytes=int(os.getenv("MAX_PDF_BYTES", str(30 * 1024 * 1024))),
+            max_pages=int(os.getenv("MAX_PAGES", "1000")),
             chunk_size=int(os.getenv("CHUNK_SIZE", "950")),
             chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
             retrieval_mode=os.getenv("RETRIEVAL_MODE", "lexical").strip().lower(),
@@ -42,7 +42,7 @@ class Settings:
             llm_mode=os.getenv("LLM_MODE", "extractive").strip().lower(),
             llm_base_url=os.getenv("LLM_BASE_URL", "https://api.groq.com/openai/v1"),
             llm_api_key=os.getenv("LLM_API_KEY", ""),
-            llm_model=os.getenv("LLM_MODEL", "llama-3.3-70b-versatile"),
+            llm_model=os.getenv("LLM_MODEL", "qwen/qwen3.8-27b"),
             llm_timeout_seconds=float(os.getenv("LLM_TIMEOUT_SECONDS", "25")),
         )
 

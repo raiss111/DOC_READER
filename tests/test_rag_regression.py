@@ -14,20 +14,20 @@ PREFIX = "/api/v1"
 
 def test_four_identical_imports_no_longer_repeat_the_same_evidence(client):
     document = pdf_bytes("Le CSS est ecrit dans une feuille de style separee.")
-    ids = []
-    for _ in range(4):
-        added = upload(client, "cours.pdf", document)
-        assert added.status_code == 201
-        ids.append(added.json()["id"])
-    assert len(set(ids)) == 4  # existing CRUD behavior is deliberately preserved
-    assert client.get(PREFIX + "/documents").json()["total"] == 4
+    original = upload(client, "cours.pdf", document)
+    assert original.status_code == 201
+    for _ in range(3):
+        duplicate = upload(client, "renamed.pdf", document)
+        assert duplicate.status_code == 409
+        assert duplicate.json()["existing_document_id"] == original.json()["id"]
+    assert client.get(PREFIX + "/documents").json()["total"] == 1
     result = client.post(PREFIX + "/questions", json={
         "question": "Ou ecrit-on le CSS ?", "top_k": 4
     }).json()
     assert result["response_mode"] == "extractive"
     assert len(result["sources"]) == 1
     assert "feuille de style" in result["sources"][0]["excerpt"]
-    assert client.get(PREFIX + "/documents").json()["total"] == 4
+    assert client.get(PREFIX + "/documents").json()["total"] == 1
 
 
 def test_llm_sees_definition_continued_on_next_page(tmp_path, monkeypatch):
