@@ -44,13 +44,12 @@ const ICONS = {
 };
 
 // ============================================================
-//  État global (en mémoire)
+//  État global
 // ============================================================
-let currentConvoId = null;      // id de la conversation active (côté serveur)
-let currentConvo = null;        // objet complet { id, title, document_ids, message_count, ... }
-let conversationsCache = [];    // liste des conversations du serveur
-let documentsCache = [];        // liste des documents du serveur
-let selectedDocId = null;       // restriction éventuelle à un document
+let currentConvoId = null;
+let currentConvo = null;
+let conversationsCache = [];
+let documentsCache = [];
 
 // ============================================================
 //  DOM
@@ -93,6 +92,54 @@ const btnDeleteConvoCancel = document.getElementById("btn-delete-convo-cancel");
 const btnDeleteConvoConfirm = document.getElementById("btn-delete-convo-confirm");
 
 // ============================================================
+//  Sidebar responsive — ouverture/fermeture sur mobile
+// ============================================================
+const sidebarEl = document.getElementById("sidebar");
+const sidebarOverlay = document.getElementById("sidebar-overlay");
+const btnToggleSidebar = document.getElementById("btn-toggle-sidebar");
+
+function openSidebar() {
+  if (!sidebarEl) return;
+  sidebarEl.classList.add("open");
+  if (sidebarOverlay) sidebarOverlay.hidden = false;
+}
+
+function closeSidebar() {
+  if (!sidebarEl) return;
+  sidebarEl.classList.remove("open");
+  if (sidebarOverlay) sidebarOverlay.hidden = true;
+}
+
+function toggleSidebar() {
+  if (!sidebarEl) return;
+  if (sidebarEl.classList.contains("open")) closeSidebar();
+  else openSidebar();
+}
+
+if (btnToggleSidebar) {
+  btnToggleSidebar.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleSidebar();
+  });
+}
+
+if (sidebarOverlay) {
+  sidebarOverlay.addEventListener("click", closeSidebar);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && sidebarEl && sidebarEl.classList.contains("open")) {
+    closeSidebar();
+  }
+});
+
+function closeSidebarOnMobile() {
+  if (window.matchMedia("(max-width: 768px)").matches) {
+    closeSidebar();
+  }
+}
+
+// ============================================================
 //  Helpers HTTP
 // ============================================================
 function authHeaders(extra = {}) {
@@ -124,11 +171,6 @@ async function apiFetch(url, options = {}) {
 
 // ============================================================
 //  Styles des bulles selon le mode de réponse du backend
-//  Modes possibles :
-//    extractive, llm        → réponse standard
-//    source_quote           → citation exacte (bordure + guillemets)
-//    no_evidence            → italique gris
-//    chat_fallback, llm_chat → réponse conversationnelle, gris discret
 // ============================================================
 function applyBubbleStyles(bubble, mode) {
   if (mode === "source_quote") {
@@ -146,10 +188,52 @@ function isChatTurn(mode) {
 }
 
 // ============================================================
+//  Titre auto : tronque proprement au dernier mot complet
+// ============================================================
+function makeTitle(text) {
+  const clean = text.replace(/\s+/g, " ").trim();
+  if (clean.length <= 40) return clean;
+  const cut = clean.slice(0, 40);
+  const lastSpace = cut.lastIndexOf(" ");
+  return (lastSpace > 20 ? cut.slice(0, lastSpace) : cut) + "…";
+}
+
+// ============================================================
+//  Documents attachés à la conversation active
+// ============================================================
+function getConversationDocuments() {
+  if (!currentConvo || !Array.isArray(currentConvo.document_ids)) {
+    return [];
+  }
+  const ids = new Set(currentConvo.document_ids);
+  return documentsCache.filter((d) => ids.has(d.id));
+}
+
+// ============================================================
+//  Lier une liste de documents à la conversation active
+// ============================================================
+async function setConversationDocuments(documentIds) {
+  if (!currentConvoId) return null;
+  try {
+    const res = await apiFetch(`${CONVOS_URL}/${currentConvoId}/documents`, {
+      method: "PUT",
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ document_ids: documentIds }),
+    });
+    const updated = await res.json();
+    currentConvo = updated;
+    const idx = conversationsCache.findIndex((c) => c.id === currentConvoId);
+    if (idx !== -1) conversationsCache[idx] = updated;
+    return updated;
+  } catch (err) {
+    console.error("Échec mise à jour documents de la conversation :", err);
+    alert("❌ Impossible de lier les documents à la conversation : " + err.message);
+    return null;
+  }
+}
+
+// ============================================================
 //  État vide des messages
-//  IMPORTANT : on ne met RIEN dans .messages pour laisser
-//  le CSS afficher automatiquement le greeting centré
-//  (.chat:has(.messages:empty) .greeting { display: block; })
 // ============================================================
 function renderMessagesEmpty() {
   messagesEl.innerHTML = "";
@@ -166,7 +250,6 @@ async function init() {
     if (conversationsCache.length > 0) {
       await selectConversation(conversationsCache[0].id);
     } else {
-      // Aucune conversation : on vide .messages → greeting centré
       renderMessagesEmpty();
       renderConversations();
     }
@@ -185,6 +268,12 @@ async function refreshConversations() {
     const res = await apiFetch(`${CONVOS_URL}?limit=100`, { headers: authHeaders() });
     const data = await res.json();
     conversationsCache = data.items || [];
+
+    if (currentConvoId) {
+      const updated = conversationsCache.find((c) => c.id === currentConvoId);
+      if (updated) currentConvo = updated;
+    }
+
     renderConversations();
   } catch (err) {
     console.warn("Erreur de chargement des conversations :", err);
@@ -197,17 +286,16 @@ async function refreshConversations() {
 }
 
 async function createNewConversation() {
-  // Réutilise la conversation active si elle est déjà vide
   if (currentConvo && currentConvo.message_count === 0) {
     console.log("Réutilisation de la conversation vide :", currentConvoId);
     return currentConvo;
   }
 
-  // Feedback visuel
   btnNewChat.disabled = true;
   btnNewChat.classList.add("loading");
 
   try {
+    // Chaque conversation voit tous les documents disponibles (pas d'isolation).
     const allDocIds = documentsCache.map((d) => d.id);
     const res = await apiFetch(CONVOS_URL, {
       method: "POST",
@@ -224,6 +312,8 @@ async function createNewConversation() {
     currentConvo = convo;
     currentConvoId = convo.id;
     renderMessagesEmpty();
+    updateDocsCount();
+    renderDocsModalList();
     renderConversations();
     input.focus();
     return convo;
@@ -250,6 +340,8 @@ async function selectConversation(id) {
     const dataMsgs = await resMsgs.json();
 
     renderMessages(dataMsgs.items || []);
+    updateDocsCount();
+    renderDocsModalList();
     renderConversations();
     input.focus();
   } catch (err) {
@@ -272,6 +364,8 @@ async function deleteConversation(id) {
         await selectConversation(conversationsCache[0].id);
       } else {
         renderMessagesEmpty();
+        updateDocsCount();
+        renderDocsModalList();
         renderConversations();
       }
     } else {
@@ -294,8 +388,13 @@ async function renameConversation(id, newTitle) {
     if (idx !== -1) conversationsCache[idx] = updated;
     if (currentConvoId === id) currentConvo = updated;
     renderConversations();
+    console.log("[rename] Titre mis à jour :", updated.title);
   } catch (err) {
-    console.warn("Renommage conversation :", err);
+    console.error("[rename] Échec renommage :", err.message, "status=" + err.status);
+    try {
+      const text = await err.response?.text();
+      console.error("[rename] Réponse serveur :", text);
+    } catch {}
   }
 }
 
@@ -308,9 +407,7 @@ function renderConversations() {
   if (conversationsCache.length === 0) {
     const empty = document.createElement("div");
     empty.className = "conversations-empty";
-    empty.textContent = documentsCache.length === 0
-      ? "Ajoutez un PDF pour commencer"
-      : "Aucune conversation";
+    empty.textContent = "Aucune conversation";
     conversationsEl.appendChild(empty);
     return;
   }
@@ -346,6 +443,7 @@ function renderConversations() {
 
     item.addEventListener("click", () => {
       if (c.id !== currentConvoId) selectConversation(c.id);
+      closeSidebarOnMobile();
     });
 
     conversationsEl.appendChild(item);
@@ -355,8 +453,9 @@ function renderConversations() {
 // ============================================================
 //  Bouton "Nouvelle conversation"
 // ============================================================
-btnNewChat.addEventListener("click", () => {
-  createNewConversation();
+btnNewChat.addEventListener("click", async () => {
+  await createNewConversation();
+  closeSidebarOnMobile();
 });
 
 // ============================================================
@@ -394,7 +493,7 @@ modalDeleteConvo.addEventListener("click", (e) => {
 //  Documents — API
 // ============================================================
 function updateDocsCount() {
-  docsCount.textContent = documentsCache.length;
+  docsCount.textContent = getConversationDocuments().length;
 }
 
 async function refreshDocuments() {
@@ -402,12 +501,8 @@ async function refreshDocuments() {
     const res = await apiFetch(`${DOCS_URL}?limit=100`, { headers: authHeaders() });
     const data = await res.json();
     documentsCache = data.items || [];
-    if (selectedDocId && !documentsCache.some((d) => d.id === selectedDocId)) {
-      selectedDocId = null;
-    }
     updateDocsCount();
     renderDocsModalList();
-    renderScopeBar();
   } catch (err) {
     console.warn("Erreur de chargement des documents :", err);
     documentsCache = [];
@@ -420,18 +515,25 @@ async function refreshDocuments() {
   }
 }
 
+// ============================================================
+//  Liste des documents — uniquement ceux de la conversation
+// ============================================================
 function renderDocsModalList() {
   docsList.innerHTML = "";
 
-  if (documentsCache.length === 0) {
+  const convoDocs = getConversationDocuments();
+
+  if (convoDocs.length === 0) {
     const empty = document.createElement("div");
     empty.className = "docs-empty";
-    empty.textContent = "Aucun document indexé";
+    empty.textContent = currentConvoId
+      ? "Aucun document dans cette conversation"
+      : "Aucune conversation active";
     docsList.appendChild(empty);
     return;
   }
 
-  documentsCache.forEach((doc) => {
+  convoDocs.forEach((doc) => {
     const row = document.createElement("div");
     row.className = "doc-row";
 
@@ -457,63 +559,22 @@ function renderDocsModalList() {
     const actions = document.createElement("div");
     actions.className = "doc-row-actions";
 
-    const btnTrash = document.createElement("button");
-    btnTrash.className = "doc-row-btn danger";
-    btnTrash.title = "Supprimer ce PDF";
-    btnTrash.innerHTML = ICONS.trash;
-    btnTrash.addEventListener("click", (e) => {
+    const btnDetach = document.createElement("button");
+    btnDetach.className = "doc-row-btn danger";
+    btnDetach.title = "Retirer ce PDF de la conversation";
+    btnDetach.innerHTML = ICONS.close;
+    btnDetach.addEventListener("click", (e) => {
       e.stopPropagation();
       openDeleteModal(doc);
     });
-    actions.appendChild(btnTrash);
+    actions.appendChild(btnDetach);
 
     row.appendChild(icon);
     row.appendChild(body);
     row.appendChild(actions);
 
-    row.addEventListener("click", () => {
-      selectedDocId = selectedDocId === doc.id ? null : doc.id;
-      renderDocsModalList();
-      renderScopeBar();
-    });
-
-    if (doc.id === selectedDocId) {
-      row.style.background = "var(--primary-soft)";
-    }
-
     docsList.appendChild(row);
   });
-}
-
-function renderScopeBar() {
-  let bar = document.getElementById("scope-bar");
-  if (!selectedDocId) {
-    if (bar) bar.remove();
-    return;
-  }
-  const doc = documentsCache.find((d) => d.id === selectedDocId);
-  const label = doc ? doc.filename : selectedDocId.slice(0, 8);
-
-  if (!bar) {
-    bar = document.createElement("div");
-    bar.id = "scope-bar";
-    bar.className = "scope-bar";
-    messagesEl.parentElement.insertBefore(bar, messagesEl);
-  }
-  bar.innerHTML = "";
-  const chip = document.createElement("span");
-  chip.className = "scope-chip";
-  chip.innerHTML = ICONS.file + `<span>${label}</span>`;
-  const clear = document.createElement("button");
-  clear.className = "scope-clear";
-  clear.textContent = "Tout interroger";
-  clear.addEventListener("click", () => {
-    selectedDocId = null;
-    renderDocsModalList();
-    renderScopeBar();
-  });
-  bar.appendChild(chip);
-  bar.appendChild(clear);
 }
 
 // ============================================================
@@ -527,7 +588,11 @@ function closeDocsModal() {
   modalDocs.hidden = true;
 }
 
-btnOpenDocs.addEventListener("click", openDocsModal);
+btnOpenDocs.addEventListener("click", () => {
+  openDocsModal();
+  closeSidebarOnMobile();
+});
+
 btnDocsClose.addEventListener("click", closeDocsModal);
 modalDocs.addEventListener("click", (e) => {
   if (e.target === modalDocs) closeDocsModal();
@@ -595,7 +660,7 @@ modalToolarge.addEventListener("click", (e) => {
 });
 
 // ============================================================
-//  Upload d'un document
+//  Upload d'un document — l'ajoute ET le lie à la conversation
 // ============================================================
 fileInput.addEventListener("change", async () => {
   const file = fileInput.files[0];
@@ -629,35 +694,55 @@ fileInput.addEventListener("change", async () => {
       body: formData,
     });
 
+    let docId = null;
+
     if (res.status === 409) {
       const payload = await res.json();
-      console.warn("Doublon détecté :", payload);
-      await refreshDocuments();
-      if (payload.existing_document_id) {
-        selectedDocId = payload.existing_document_id;
-        renderDocsModalList();
-        renderScopeBar();
-        alert("Ce PDF existe déjà dans la bibliothèque. Il a été sélectionné.");
-      } else {
-        alert("Ce PDF existe déjà dans la bibliothèque.");
-      }
-      return;
+      console.warn("[upload] Doublon détecté :", payload);
+      docId = payload.existing_document_id;
+    } else if (!res.ok) {
+      throw new Error(await extractError(res));
+    } else {
+      const doc = await res.json();
+      console.log("[upload] Nouveau document :", doc);
+      docId = doc.id;
     }
 
-    if (!res.ok) throw new Error(await extractError(res));
+    if (!docId) {
+      throw new Error("Impossible d'obtenir l'ID du document.");
+    }
 
-    const doc = await res.json();
-    console.log("Document ajouté :", doc);
-
+    // 1) Recharge la bibliothèque globale
     await refreshDocuments();
-    selectedDocId = doc.id;
-    renderDocsModalList();
-    renderScopeBar();
 
-    if (!currentConvoId && conversationsCache.length === 0) {
-      await createNewConversation();
+    // 2) Crée une conversation si aucune n'existe
+    if (!currentConvoId) {
+      const convo = await createNewConversation();
+      if (!convo) return;
+    }
+
+    // 3) Rafraîchit currentConvo depuis le serveur
+    try {
+      const resConvo = await apiFetch(`${CONVOS_URL}/${currentConvoId}`, { headers: authHeaders() });
+      currentConvo = await resConvo.json();
+      const idx = conversationsCache.findIndex((c) => c.id === currentConvoId);
+      if (idx !== -1) conversationsCache[idx] = currentConvo;
+    } catch (err) {
+      console.warn("[upload] Impossible de rafraîchir la conversation :", err);
+    }
+
+    // 4) Ajoute le nouveau doc à la liste existante (sans écraser)
+    const current = new Set(currentConvo.document_ids || []);
+    current.add(docId);
+
+    const updated = await setConversationDocuments([...current]);
+    if (updated) {
+      updateDocsCount();
+      renderDocsModalList();
+      renderConversations();
     }
   } catch (err) {
+    console.error("[upload] Erreur :", err);
     alert("❌ Erreur upload : " + err.message);
   } finally {
     btnPlus.disabled = false;
@@ -669,7 +754,7 @@ fileInput.addEventListener("change", async () => {
 });
 
 // ============================================================
-//  Suppression d'un document
+//  Retirer un document de la conversation
 // ============================================================
 let docToDelete = null;
 
@@ -689,34 +774,31 @@ btnDeleteConfirm.addEventListener("click", async () => {
   const target = docToDelete;
 
   btnDeleteConfirm.disabled = true;
-  btnDeleteConfirm.textContent = "Suppression…";
+  btnDeleteConfirm.textContent = "Retrait…";
 
   try {
-    await apiFetch(`${DOCS_URL}/${target.id}`, {
-      method: "DELETE",
-      headers: authHeaders(),
-    });
-
-    modalDelete.hidden = true;
-    docToDelete = null;
-
-    if (selectedDocId === target.id) selectedDocId = null;
-
-    await refreshDocuments();
-    await refreshConversations();
-
-    if (currentConvo && currentConvo.document_ids) {
-      currentConvo.document_ids = currentConvo.document_ids.filter(
+    if (currentConvoId && currentConvo) {
+      const remaining = (currentConvo.document_ids || []).filter(
         (id) => id !== target.id
       );
-    }
+      const updated = await setConversationDocuments(remaining);
+      if (updated) {
+        modalDelete.hidden = true;
+        docToDelete = null;
 
-    appendSystemMessage(`Le document « ${target.filename} » a été supprimé.`);
+        updateDocsCount();
+        renderDocsModalList();
+
+        appendSystemMessage(
+          `Le document « ${target.filename} » a été retiré de cette conversation.`
+        );
+      }
+    }
   } catch (err) {
-    alert("❌ Erreur suppression : " + err.message);
+    alert("❌ Erreur retrait : " + err.message);
   } finally {
     btnDeleteConfirm.disabled = false;
-    btnDeleteConfirm.textContent = "Supprimer";
+    btnDeleteConfirm.textContent = "Retirer";
   }
 });
 
@@ -773,8 +855,6 @@ function appendSystemMessage(text) {
   scrollToBottom();
 }
 
-// Affiche les messages d'une conversation (chargés depuis /messages).
-// Si vide, on laisse .messages vide → le CSS affiche le greeting centré.
 function renderMessages(messages) {
   messagesEl.innerHTML = "";
   if (!messages || messages.length === 0) {
@@ -900,7 +980,6 @@ function setLoading(loading) {
 
 // ============================================================
 //  Envoi d'une question
-//  Utilise POST /api/v1/conversations/{id}/questions
 // ============================================================
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -908,13 +987,19 @@ form.addEventListener("submit", async (event) => {
   const text = input.value.trim();
   if (!text) return;
 
-  // Le backend accepte les salutations même sans document attaché.
   if (!currentConvoId) {
     const convo = await createNewConversation();
     if (!convo) return;
   }
 
-  // ✅ CAPTURE AVANT ENVOI : la conversation était-elle vide ?
+  // Rafraîchit currentConvo depuis le serveur
+  try {
+    const resConvo = await apiFetch(`${CONVOS_URL}/${currentConvoId}`, { headers: authHeaders() });
+    currentConvo = await resConvo.json();
+    const idx = conversationsCache.findIndex((c) => c.id === currentConvoId);
+    if (idx !== -1) conversationsCache[idx] = currentConvo;
+  } catch {}
+
   const wasEmpty = currentConvo && currentConvo.message_count === 0;
 
   addMessage("user", text);
@@ -939,9 +1024,6 @@ form.addEventListener("submit", async (event) => {
       question: text,
       top_k: 4,
     };
-    if (selectedDocId) {
-      body.document_ids = [selectedDocId];
-    }
 
     const res = await fetch(`${CONVOS_URL}/${currentConvoId}/questions`, {
       method: "POST",
@@ -964,14 +1046,13 @@ form.addEventListener("submit", async (event) => {
       mode: data.response_mode || null,
     });
 
-    // ✅ Titre auto basé sur la valeur capturée AVANT l'envoi
-    //    On saute les simples salutations (chat_fallback, llm_chat)
+    // Titre auto à la 1ère vraie question
     if (wasEmpty && !isChatTurn(data.response_mode)) {
-      const newTitle = text.slice(0, 40) + (text.length > 40 ? "…" : "");
+      const newTitle = makeTitle(text);
       await renameConversation(currentConvoId, newTitle);
     }
 
-    // Rafraîchit les métadonnées (message_count, updated_at)
+    // Rafraîchit les métadonnées
     try {
       const resConvo = await apiFetch(`${CONVOS_URL}/${currentConvoId}`, { headers: authHeaders() });
       currentConvo = await resConvo.json();

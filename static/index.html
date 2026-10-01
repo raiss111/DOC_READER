@@ -8,6 +8,9 @@
 </head>
 <body>
     <div class="app">
+        <!-- Overlay pour fermer la sidebar sur mobile -->
+        <div class="sidebar-overlay" id="sidebar-overlay" hidden></div>
+
         <!-- SIDEBAR -->
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
@@ -92,7 +95,7 @@
         </main>
     </div>
 
-    <!-- MODAL : liste des documents -->
+    <!-- MODAL : liste des documents de la conversation -->
     <div class="modal-backdrop" id="modal-docs" hidden>
         <div class="modal modal-docs">
             <div class="modal-header">
@@ -150,17 +153,21 @@
         </div>
     </div>
 
-    <!-- Modale : confirmer la suppression d'un document -->
+    <!-- Modale : retirer un document de la conversation -->
     <div class="modal-backdrop" id="modal-delete" hidden>
         <div class="modal">
-            <div class="modal-title">Supprimer le document</div>
+            <div class="modal-title">Retirer le document</div>
             <div class="modal-body">
                 <p id="delete-doc-name" class="modal-doc-name"></p>
-                <p class="modal-hint">Cette action est <strong>irréversible</strong>. Le fichier, ses chunks et son index seront supprimés.</p>
+                <p class="modal-hint">
+                    Ce document sera retiré de <strong>cette conversation</strong>.
+                    Il restera disponible dans la bibliothèque du serveur et pourra être
+                    rattaché à nouveau à une autre conversation.
+                </p>
             </div>
             <div class="modal-actions">
                 <button class="btn-modal-cancel" id="btn-delete-cancel">Annuler</button>
-                <button class="btn-modal-danger" id="btn-delete-confirm">Supprimer</button>
+                <button class="btn-modal-danger" id="btn-delete-confirm">Retirer</button>
             </div>
         </div>
     </div>
