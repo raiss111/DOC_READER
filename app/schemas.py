@@ -1,8 +1,54 @@
-"""Versioned API contracts. V3 question and answer fields remain compatible."""
+"""Versioned API contracts.
+
+V3/V4 fields remain compatible. V4.2 adds optional LLM-generation diagnostics so
+clients can distinguish provider failures from responses rejected by citation
+validation without exposing secrets or internal prompts.
+"""
 from __future__ import annotations
 
 from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+FallbackReason = Literal[
+    "llm_disabled",
+    "llm_not_configured",
+    "llm_timeout",
+    "llm_connection_error",
+    "llm_provider_error",
+    "llm_invalid_payload",
+    "llm_empty_answer",
+    "missing_citations",
+    "invalid_citation_reference",
+    "insufficient_evidence",
+    "no_document",
+]
+
+GenerationStatus = Literal[
+    "not_attempted",
+    "success",
+    "rejected",
+    "unavailable",
+    "error",
+]
+
+
+class GenerationOut(BaseModel):
+    """Safe, user-visible diagnostics for the LLM generation attempt.
+
+    ``rejected_answer`` contains only the model's generated answer when local
+    validation rejects it. Raw provider payloads, headers, API keys and system
+    prompts must never be placed here.
+    """
+
+    attempted: bool
+    status: GenerationStatus
+    provider: str | None = None
+    model: str | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    error_type: str | None = None
+    rejected_answer: str | None = None
 
 
 class DocumentOut(BaseModel):
@@ -43,6 +89,9 @@ class AnswerOut(BaseModel):
     response_mode: str
     sources: list[SourceOut]
     warning: str | None = None
+    request_id: str | None = None
+    fallback_reason: FallbackReason | None = None
+    generation: GenerationOut | None = None
 
 
 class ConversationIn(BaseModel):

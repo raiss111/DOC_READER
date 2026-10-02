@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
+import time
 import uuid
 from pathlib import Path
 
@@ -14,7 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import APIKeyHeader
 from fastapi.staticfiles import StaticFiles
 
-from .answering import Answerer, is_social_turn
+from .answering import Answerer, is_social_turn, question_language
 from .config import Settings
 from .pdf_processing import InvalidPDF, extract_pdf
 from .retrieval import Retriever, is_contextual_followup, tokenize
@@ -33,6 +35,7 @@ from .schemas import (
 from .store import DuplicateDocument, MissingDocuments, NotFound, Store
 
 header_scheme = APIKeyHeader(name="X-API-Key", auto_error=False)
+logger = logging.getLogger(__name__)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -56,6 +59,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.store = store
     app.state.settings = settings
+
+    def log_event(
+        event: str,
+        *,
+        request_id: str,
+        level: int = logging.INFO,
+        **fields: object,
+    ) -> None:
+        """Emit compact, grep-friendly request diagnostics without secrets.
+
+        Questions, PDF excerpts, prompts, API keys and provider payloads are never
+        written here. Only operational metadata useful for tracing a request is
+        included.
+        """
+        parts = [f"event={event}", f"request_id={request_id}"]
+        for key, value in fields.items():
+            if value is None:
+                value = "-"
+            text = re.sub(r"[\r\n\t]+", " ", str(value)).strip()
+            parts.append(f"{key}={text or '-'}")
+        logger.log(level, " ".join(parts))
 
     # ---- Service du frontend (HTML / CSS / JS) ----
     static_dir = Path(__file__).resolve().parents[1] / "static"
@@ -384,7 +408,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return question
 
-    def semantic_candidates(document_ids: list[str] | None) -> list[dict]:
+    def semantic_candidates(
+        document_ids: list[str] | None,
+        *,
+        request_id: str,
+    ) -> list[dict]:
         """Load current-model embeddings and lazily backfill missing vectors.
 
         Documents imported while the app was in lexical mode have no E5 cache.
@@ -397,10 +425,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not missing:
             return rows
 
+        log_event(
+            "embedding_backfill_started",
+            request_id=request_id,
+            model=settings.embedding_model,
+            total_chunks=len(rows),
+            missing_chunks=len(missing),
+        )
+        started = time.perf_counter()
         vectors = retriever.embed_passages([row["content"] for row in missing])
         store.save_embeddings(
             [(int(row["id"]), vector) for row, vector in zip(missing, vectors)],
             settings.embedding_model,
+        )
+        log_event(
+            "embedding_backfill_completed",
+            request_id=request_id,
+            model=settings.embedding_model,
+            embedded_chunks=len(vectors),
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
         )
 
         encoded_by_id = {
@@ -422,7 +465,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request: QuestionIn,
         document_ids: list[str] | None,
         history: list[dict] | None = None,
+        *,
+        request_id: str,
+        conversation_id: str | None = None,
     ) -> dict:
+        started = time.perf_counter()
         question = request.question.strip()
         if len(question) < 3:
             raise HTTPException(
@@ -438,17 +485,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if ids is not None:
             missing = store.missing_document_ids(ids)
             if missing:
+                log_event(
+                    "question_blocked",
+                    request_id=request_id,
+                    level=logging.WARNING,
+                    conversation_id=conversation_id,
+                    reason="missing_documents",
+                    missing_document_count=len(missing),
+                )
                 raise HTTPException(
                     status_code=404,
                     detail={"documents_introuvables": missing},
                 )
 
+        language = question_language(question)
+        scope = "library" if ids is None else "conversation_or_explicit"
+        log_event(
+            "question_started",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            language=language,
+            retrieval_mode=settings.retrieval_mode,
+            llm_mode=settings.llm_mode,
+            document_scope=scope,
+            document_count="all" if ids is None else len(ids),
+            document_ids="all" if ids is None else ",".join(ids) or "none",
+            top_k=request.top_k,
+        )
+
         # Courtesy turns are conversational, not retrieval failures. They must
         # not become a backdoor for answering general-knowledge questions.
         if is_social_turn(question):
-            return answerer.social_reply(question, history=history)
+            result = answerer.social_reply(
+                question,
+                history=history,
+                request_id=request_id,
+            )
+            result["request_id"] = request_id
+            log_event(
+                "response_completed",
+                request_id=request_id,
+                conversation_id=conversation_id,
+                response_mode=result.get("response_mode"),
+                fallback_reason=result.get("fallback_reason"),
+                source_count=len(result.get("sources", [])),
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
+            return result
 
         query = retrieval_query(question, history)
+        retrieval_started = time.perf_counter()
+        log_event(
+            "retrieval_started",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            retrieval_mode=settings.retrieval_mode,
+        )
 
         try:
             if settings.retrieval_mode == "lexical":
@@ -457,10 +549,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     ids,
                     limit=max(300, request.top_k * 60),
                 )
+                semantic_rows: list[dict] = []
                 hits = retriever.search(query, lexical_rows, request.top_k)
 
             elif settings.retrieval_mode == "semantic":
-                semantic_rows = semantic_candidates(ids)
+                lexical_rows = []
+                semantic_rows = semantic_candidates(
+                    ids,
+                    request_id=request_id,
+                )
                 hits = retriever.search(query, semantic_rows, request.top_k)
 
             else:  # hybrid
@@ -472,7 +569,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         request.top_k * 20,
                     ),
                 )
-                semantic_rows = semantic_candidates(ids)
+                semantic_rows = semantic_candidates(
+                    ids,
+                    request_id=request_id,
+                )
                 hits = retriever.hybrid_search(
                     query,
                     lexical_rows,
@@ -485,15 +585,52 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 hits = retriever.expand_context(hits, neighbors)
 
         except RuntimeError as exc:
+            log_event(
+                "retrieval_failed",
+                request_id=request_id,
+                level=logging.ERROR,
+                conversation_id=conversation_id,
+                retrieval_mode=settings.retrieval_mode,
+                error_type=type(exc).__name__,
+            )
             raise HTTPException(status_code=503, detail=str(exc)) from exc
 
-        return answerer.answer(
+        top_hit = hits[0] if hits else None
+        log_event(
+            "retrieval_completed",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            retrieval_mode=settings.retrieval_mode,
+            lexical_candidates=len(lexical_rows),
+            semantic_candidates=len(semantic_rows),
+            hit_count=len(hits),
+            top_document=top_hit.get("filename") if top_hit else None,
+            top_document_id=top_hit.get("document_id") if top_hit else None,
+            top_page=top_hit.get("page") if top_hit else None,
+            top_score=top_hit.get("score") if top_hit else None,
+            duration_ms=round((time.perf_counter() - retrieval_started) * 1000, 1),
+        )
+
+        result = answerer.answer(
             question,
             hits,
             answer_style=request.answer_style,
             include_excerpts=request.include_excerpts,
             history=history,
+            request_id=request_id,
         )
+        result["request_id"] = request_id
+        log_event(
+            "response_completed",
+            request_id=request_id,
+            conversation_id=conversation_id,
+            response_mode=result.get("response_mode"),
+            fallback_reason=result.get("fallback_reason"),
+            generation_status=(result.get("generation") or {}).get("status"),
+            source_count=len(result.get("sources", [])),
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        )
+        return result
 
     @protected.post(
         "/questions",
@@ -505,7 +642,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Backward-compatible V1-V3 endpoint. If document_ids is omitted this
         # intentionally searches the whole library. Conversation endpoints below
         # are the recommended scoped path when isolation matters.
-        return answer_question(request, request.document_ids)
+        request_id = str(uuid.uuid4())
+        return answer_question(
+            request,
+            request.document_ids,
+            request_id=request_id,
+        )
 
     @protected.post(
         "/conversations",
@@ -660,14 +802,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # A pure greeting/thanks is allowed even before documents are attached.
         # Any substantive question remains scoped to at least one conversation
         # document.
+        request_id = str(uuid.uuid4())
+
         if not ids and not is_social_turn(request.question.strip()):
+            log_event(
+                "question_blocked",
+                request_id=request_id,
+                level=logging.WARNING,
+                conversation_id=conversation_id,
+                reason="no_document",
+                document_count=0,
+            )
             raise HTTPException(
                 status_code=422,
                 detail="Associer au moins un document à la conversation.",
             )
 
         history = store.message_history(conversation_id, limit=8)
-        result = answer_question(request, ids, history)
+        result = answer_question(
+            request,
+            ids,
+            history,
+            request_id=request_id,
+            conversation_id=conversation_id,
+        )
 
         try:
             store.append_exchange(

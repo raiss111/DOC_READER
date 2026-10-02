@@ -6,6 +6,7 @@ knowledge into evidence.
 """
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from functools import lru_cache
@@ -15,6 +16,8 @@ from lingua import Language, LanguageDetectorBuilder
 
 from .config import Settings
 from .retrieval import definition_subject
+
+logger = logging.getLogger(__name__)
 
 NO_EVIDENCE_FR = "Je n'ai trouvé aucun passage pertinent dans les documents sélectionnés."
 NO_EVIDENCE_EN = "I couldn't find any relevant passage in the selected documents."
@@ -334,7 +337,88 @@ class Answerer:
             for source in sources
         )
 
-    def social_reply(self, message: str, history: list[dict] | None = None) -> dict:
+    @staticmethod
+    def _answer_preview(text: str | None, limit: int = 500) -> str | None:
+        """Return a compact log-safe preview of a model answer.
+
+        Never log headers, provider payloads, prompts or credentials. The API may
+        expose the complete *generated answer* when local validation rejects it,
+        while logs intentionally keep only a short one-line preview.
+        """
+        if not text:
+            return None
+        compact = re.sub(r"\s+", " ", text).strip()
+        return compact[:limit]
+
+    def _generation(
+        self,
+        *,
+        attempted: bool,
+        status: str,
+        http_status: int | None = None,
+        error_type: str | None = None,
+        rejected_answer: str | None = None,
+    ) -> dict:
+        return {
+            "attempted": attempted,
+            "status": status,
+            "provider": "openai_compatible" if self.settings.llm_mode == "openai_compatible" else None,
+            "model": self.settings.llm_model if self.settings.llm_mode == "openai_compatible" else None,
+            "http_status": http_status,
+            "error_type": error_type,
+            "rejected_answer": rejected_answer,
+        }
+
+    def _llm_is_configured(self) -> bool:
+        """Check configuration required before making an OpenAI-compatible request.
+
+        An API key is intentionally *not* required here. Some OpenAI-compatible
+        servers are local or unauthenticated, and tests may replace the HTTP call
+        with a deterministic fake. If a remote provider requires authentication,
+        an absent/invalid key will be reported precisely from its HTTP response
+        (for example 401/403 -> ``llm_provider_error``) instead of being guessed
+        locally as ``llm_not_configured``.
+        """
+        if self.settings.llm_mode != "openai_compatible":
+            return False
+        return bool(
+            self.settings.llm_base_url.strip()
+            and self.settings.llm_model.strip()
+        )
+
+    def _log_generation(
+        self,
+        *,
+        event: str,
+        request_id: str | None,
+        level: int = logging.INFO,
+        reason: str | None = None,
+        http_status: int | None = None,
+        error_type: str | None = None,
+        rejected_answer: str | None = None,
+    ) -> None:
+        """Emit structured, grep-friendly diagnostics without secrets."""
+        logger.log(
+            level,
+            "event=%s request_id=%s provider=%s model=%s reason=%s http_status=%s "
+            "error_type=%s answer_preview=%r",
+            event,
+            request_id or "-",
+            "openai_compatible" if self.settings.llm_mode == "openai_compatible" else self.settings.llm_mode,
+            self.settings.llm_model if self.settings.llm_mode == "openai_compatible" else "-",
+            reason or "-",
+            http_status if http_status is not None else "-",
+            error_type or "-",
+            self._answer_preview(rejected_answer),
+        )
+
+    def social_reply(
+        self,
+        message: str,
+        history: list[dict] | None = None,
+        *,
+        request_id: str | None = None,
+    ) -> dict:
         """Handle courtesy turns without pretending that they are PDF evidence."""
         messages = _messages(message)
         fallback = messages["social"]
@@ -345,6 +429,24 @@ class Answerer:
                 "response_mode": "chat_fallback",
                 "sources": [],
                 "warning": None,
+                "fallback_reason": "llm_disabled",
+                "generation": self._generation(attempted=False, status="not_attempted"),
+            }
+
+        if not self._llm_is_configured():
+            self._log_generation(
+                event="llm_not_configured",
+                request_id=request_id,
+                level=logging.WARNING,
+                reason="llm_not_configured",
+            )
+            return {
+                "answer": fallback,
+                "response_mode": "chat_fallback",
+                "sources": [],
+                "warning": messages["social_warning"],
+                "fallback_reason": "llm_not_configured",
+                "generation": self._generation(attempted=False, status="unavailable"),
             }
 
         language_name = question_language_name(message)
@@ -359,6 +461,33 @@ class Answerer:
         headers = {"Content-Type": "application/json"}
         if self.settings.llm_api_key:
             headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
+
+        def social_unavailable(
+            reason: str,
+            exc: Exception,
+            http_status: int | None = None,
+        ) -> dict:
+            self._log_generation(
+                event="llm_unavailable",
+                request_id=request_id,
+                level=logging.WARNING,
+                reason=reason,
+                http_status=http_status,
+                error_type=type(exc).__name__,
+            )
+            return {
+                "answer": fallback,
+                "response_mode": "chat_fallback",
+                "sources": [],
+                "warning": messages["social_warning"],
+                "fallback_reason": reason,
+                "generation": self._generation(
+                    attempted=True,
+                    status="unavailable",
+                    http_status=http_status,
+                    error_type=type(exc).__name__,
+                ),
+            }
 
         try:
             with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
@@ -375,22 +504,83 @@ class Answerer:
                     },
                 )
                 response.raise_for_status()
-                answer = response.json()["choices"][0]["message"]["content"].strip()
+                http_status = response.status_code
+                try:
+                    answer = response.json()["choices"][0]["message"]["content"].strip()
+                except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+                    self._log_generation(
+                        event="llm_invalid_payload",
+                        request_id=request_id,
+                        level=logging.WARNING,
+                        reason="llm_invalid_payload",
+                        http_status=http_status,
+                        error_type=type(exc).__name__,
+                    )
+                    return {
+                        "answer": fallback,
+                        "response_mode": "chat_fallback",
+                        "sources": [],
+                        "warning": messages["social_warning"],
+                        "fallback_reason": "llm_invalid_payload",
+                        "generation": self._generation(
+                            attempted=True,
+                            status="error",
+                            http_status=http_status,
+                            error_type=type(exc).__name__,
+                        ),
+                    }
+
             if not answer:
-                raise ValueError("empty social reply")
+                self._log_generation(
+                    event="llm_rejected",
+                    request_id=request_id,
+                    level=logging.WARNING,
+                    reason="llm_empty_answer",
+                    http_status=http_status,
+                )
+                return {
+                    "answer": fallback,
+                    "response_mode": "chat_fallback",
+                    "sources": [],
+                    "warning": messages["social_warning"],
+                    "fallback_reason": "llm_empty_answer",
+                    "generation": self._generation(
+                        attempted=True,
+                        status="rejected",
+                        http_status=http_status,
+                    ),
+                }
+
+            self._log_generation(
+                event="llm_success",
+                request_id=request_id,
+                http_status=http_status,
+            )
             return {
                 "answer": answer,
                 "response_mode": "llm_chat",
                 "sources": [],
                 "warning": None,
+                "fallback_reason": None,
+                "generation": self._generation(
+                    attempted=True,
+                    status="success",
+                    http_status=http_status,
+                ),
             }
-        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, AttributeError):
-            return {
-                "answer": fallback,
-                "response_mode": "chat_fallback",
-                "sources": [],
-                "warning": messages["social_warning"],
-            }
+
+        except httpx.TimeoutException as exc:
+            return social_unavailable("llm_timeout", exc)
+        except httpx.HTTPStatusError as exc:
+            return social_unavailable(
+                "llm_provider_error",
+                exc,
+                exc.response.status_code if exc.response is not None else None,
+            )
+        except httpx.RequestError as exc:
+            return social_unavailable("llm_connection_error", exc)
+        except httpx.HTTPError as exc:
+            return social_unavailable("llm_connection_error", exc)
 
     def answer(
         self,
@@ -400,6 +590,7 @@ class Answerer:
         answer_style: str = "synthese",
         include_excerpts: bool = True,
         history: list[dict] | None = None,
+        request_id: str | None = None,
     ) -> dict:
         sources = self.make_sources(hits)
         messages = _messages(question)
@@ -412,6 +603,42 @@ class Answerer:
                     for entry in result["sources"]
                 ]
             return result
+
+        def fallback(
+            reason: str,
+            *,
+            status: str,
+            attempted: bool,
+            http_status: int | None = None,
+            error_type: str | None = None,
+            rejected_answer: str | None = None,
+        ) -> dict:
+            event = "llm_rejected" if status == "rejected" else "llm_unavailable"
+            self._log_generation(
+                event=event,
+                request_id=request_id,
+                level=logging.WARNING,
+                reason=reason,
+                http_status=http_status,
+                error_type=error_type,
+                rejected_answer=rejected_answer,
+            )
+            return present(
+                {
+                    "answer": self.extractive(sources, question),
+                    "response_mode": "extractive",
+                    "sources": sources,
+                    "warning": messages["fallback_warning"],
+                    "fallback_reason": reason,
+                    "generation": self._generation(
+                        attempted=attempted,
+                        status=status,
+                        http_status=http_status,
+                        error_type=error_type,
+                        rejected_answer=rejected_answer,
+                    ),
+                }
+            )
 
         if answer_style == "citation_exacte" and sources:
             found = _direct_definition_quote(question, hits)
@@ -437,6 +664,8 @@ class Answerer:
                         "response_mode": "source_quote",
                         "sources": [entry],
                         "warning": messages["quote_warning"],
+                        "fallback_reason": None,
+                        "generation": self._generation(attempted=False, status="not_attempted"),
                     }
                 )
 
@@ -447,6 +676,8 @@ class Answerer:
                     "response_mode": "no_evidence",
                     "sources": [],
                     "warning": None,
+                    "fallback_reason": "insufficient_evidence",
+                    "generation": self._generation(attempted=False, status="not_attempted"),
                 }
             )
 
@@ -457,7 +688,16 @@ class Answerer:
                     "response_mode": "extractive",
                     "sources": sources,
                     "warning": messages["extractive_warning"],
+                    "fallback_reason": "llm_disabled",
+                    "generation": self._generation(attempted=False, status="not_attempted"),
                 }
+            )
+
+        if not self._llm_is_configured():
+            return fallback(
+                "llm_not_configured",
+                status="unavailable",
+                attempted=False,
             )
 
         context = "\n\n".join(
@@ -551,31 +791,91 @@ class Answerer:
                     },
                 )
                 response.raise_for_status()
-                answer = response.json()["choices"][0]["message"]["content"].strip()
+                http_status = response.status_code
+                try:
+                    answer = response.json()["choices"][0]["message"]["content"].strip()
+                except (ValueError, KeyError, IndexError, TypeError, AttributeError) as exc:
+                    return fallback(
+                        "llm_invalid_payload",
+                        status="error",
+                        attempted=True,
+                        http_status=http_status,
+                        error_type=type(exc).__name__,
+                    )
 
-            valid_refs = {int(number) for number in re.findall(r"\[(\d+)\]", answer)}
-            if (
-                not answer
-                or not valid_refs
-                or any(number not in range(1, len(sources) + 1) for number in valid_refs)
-            ):
-                raise ValueError("LLM answer does not cite supplied sources")
-
-            return present(
-                {
-                    "answer": answer,
-                    "response_mode": "llm",
-                    "sources": sources,
-                    "warning": messages["citation_warning"],
-                }
+        except httpx.TimeoutException as exc:
+            return fallback(
+                "llm_timeout",
+                status="unavailable",
+                attempted=True,
+                error_type=type(exc).__name__,
+            )
+        except httpx.HTTPStatusError as exc:
+            return fallback(
+                "llm_provider_error",
+                status="unavailable",
+                attempted=True,
+                http_status=exc.response.status_code if exc.response is not None else None,
+                error_type=type(exc).__name__,
+            )
+        except httpx.RequestError as exc:
+            return fallback(
+                "llm_connection_error",
+                status="unavailable",
+                attempted=True,
+                error_type=type(exc).__name__,
+            )
+        except httpx.HTTPError as exc:
+            return fallback(
+                "llm_connection_error",
+                status="unavailable",
+                attempted=True,
+                error_type=type(exc).__name__,
             )
 
-        except (httpx.HTTPError, ValueError, KeyError, IndexError, TypeError, AttributeError):
-            return present(
-                {
-                    "answer": self.extractive(sources, question),
-                    "response_mode": "extractive",
-                    "sources": sources,
-                    "warning": messages["fallback_warning"],
-                }
+        if not answer:
+            return fallback(
+                "llm_empty_answer",
+                status="rejected",
+                attempted=True,
+                http_status=http_status,
             )
+
+        cited_refs = {int(number) for number in re.findall(r"\[(\d+)\]", answer)}
+        if not cited_refs:
+            return fallback(
+                "missing_citations",
+                status="rejected",
+                attempted=True,
+                http_status=http_status,
+                rejected_answer=answer,
+            )
+
+        if any(number not in range(1, len(sources) + 1) for number in cited_refs):
+            return fallback(
+                "invalid_citation_reference",
+                status="rejected",
+                attempted=True,
+                http_status=http_status,
+                rejected_answer=answer,
+            )
+
+        self._log_generation(
+            event="llm_success",
+            request_id=request_id,
+            http_status=http_status,
+        )
+        return present(
+            {
+                "answer": answer,
+                "response_mode": "llm",
+                "sources": sources,
+                "warning": messages["citation_warning"],
+                "fallback_reason": None,
+                "generation": self._generation(
+                    attempted=True,
+                    status="success",
+                    http_status=http_status,
+                ),
+            }
+        )
