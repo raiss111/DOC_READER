@@ -1,6 +1,8 @@
 """SQLite source of truth, transactional document lifecycle and FTS5 indexing.
 
 Schema v4 upgrades existing V1/V2/V3 databases in place; pre-upgrade DB is backed up.
+V4.2 adds a model-aware embedding cache in a separate table without altering
+existing document, chunk, conversation or message data.
 Existing duplicate documents are *not* silently removed, but new duplicates are forbidden.
 """
 from __future__ import annotations
@@ -85,6 +87,15 @@ class Store:
                     embedding_json TEXT
                 );
                 CREATE INDEX IF NOT EXISTS chunks_document_idx ON chunks(document_id, ordinal);
+                CREATE TABLE IF NOT EXISTS chunk_embeddings (
+                    chunk_id INTEGER NOT NULL REFERENCES chunks(id) ON DELETE CASCADE,
+                    model TEXT NOT NULL,
+                    embedding_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                    PRIMARY KEY(chunk_id, model)
+                );
+                CREATE INDEX IF NOT EXISTS chunk_embeddings_model_idx
+                    ON chunk_embeddings(model, chunk_id);
                 CREATE TABLE IF NOT EXISTS conversations (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
@@ -137,12 +148,50 @@ class Store:
         )}
 
     @staticmethod
-    def insert_chunks(db: sqlite3.Connection, document_id: str, chunks: list[dict]) -> None:
+    def insert_chunks(
+        db: sqlite3.Connection,
+        document_id: str,
+        chunks: list[dict],
+        *,
+        embedding_model: str | None = None,
+    ) -> None:
+        """Insert chunks and optionally persist model-aware embeddings.
+
+        ``chunks.embedding_json`` is retained as a backward-compatible mirror for
+        the existing V4 semantic path. V4.2's hybrid path uses ``chunk_embeddings``
+        so vectors produced by different models are never silently mixed.
+        """
         db.executemany(
             "INSERT INTO chunks(document_id, page, ordinal, content, embedding_json) VALUES (?,?,?,?,?)",
             [(document_id, c["page"], c["ordinal"], c["content"],
               json.dumps(c["embedding"]) if c.get("embedding") is not None else None) for c in chunks],
         )
+
+        if embedding_model:
+            vectors_by_ordinal = {
+                c["ordinal"]: c["embedding"]
+                for c in chunks
+                if c.get("embedding") is not None
+            }
+            if vectors_by_ordinal:
+                rows = db.execute(
+                    "SELECT id,ordinal FROM chunks WHERE document_id=?",
+                    (document_id,),
+                ).fetchall()
+                payload = [
+                    (row["id"], embedding_model, json.dumps(vectors_by_ordinal[row["ordinal"]]))
+                    for row in rows
+                    if row["ordinal"] in vectors_by_ordinal
+                ]
+                if payload:
+                    db.executemany(
+                        "INSERT INTO chunk_embeddings(chunk_id,model,embedding_json) VALUES(?,?,?) "
+                        "ON CONFLICT(chunk_id,model) DO UPDATE SET "
+                        "embedding_json=excluded.embedding_json, "
+                        "created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                        payload,
+                    )
+
         # FTS5 is updated atomically by database triggers.
 
     @staticmethod
@@ -159,7 +208,9 @@ class Store:
         with self.connect() as db:
             return self._existing_hash(db, sha256, excluded_id)
 
-    def create(self, record: dict, chunks: list[dict]) -> dict:
+    def create(
+        self, record: dict, chunks: list[dict], *, embedding_model: str | None = None
+    ) -> dict:
         with self.connect() as db:
             # Writer lock + check prevents two concurrent API imports of the same SHA.
             db.execute("BEGIN IMMEDIATE")
@@ -171,7 +222,7 @@ class Store:
                 (record["id"], record["filename"], str(record["file_path"]), record["sha256"],
                  record["page_count"], len(chunks)),
             )
-            self.insert_chunks(db, record["id"], chunks)
+            self.insert_chunks(db, record["id"], chunks, embedding_model=embedding_model)
         return self.get(record["id"])
 
     def get(self, document_id: str) -> dict | None:
@@ -187,7 +238,10 @@ class Store:
             ).fetchall()
             return total, [self.public(row) for row in rows]
 
-    def replace(self, document_id: str, record: dict, chunks: list[dict]) -> Path:
+    def replace(
+        self, document_id: str, record: dict, chunks: list[dict], *,
+        embedding_model: str | None = None,
+    ) -> Path:
         """Atomic DB switch to staged PDF + atomic FTS update; old file deleted by caller."""
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -204,7 +258,7 @@ class Store:
                  len(chunks), document_id),
             )
             db.execute("DELETE FROM chunks WHERE document_id=?", (document_id,))
-            self.insert_chunks(db, document_id, chunks)
+            self.insert_chunks(db, document_id, chunks, embedding_model=embedding_model)
             return Path(old["file_path"])
 
     def delete(self, document_id: str) -> Path:
@@ -283,6 +337,87 @@ class Store:
         query += " ORDER BY c.document_id,c.ordinal"
         with self.connect() as db:
             return [dict(row) for row in db.execute(query, params).fetchall()]
+
+    def semantic_chunks(
+        self,
+        document_ids: list[str] | None,
+        embedding_model: str,
+    ) -> list[dict]:
+        """Return scoped chunks with embeddings only from the requested model.
+
+        Old/unknown vectors are intentionally exposed as ``None`` so the caller
+        can recompute them with the current multilingual model. This prevents
+        mixing vector spaces when EMBEDDING_MODEL changes.
+        """
+        if document_ids == []:
+            return []
+
+        clause, params = self._chunk_query_where(document_ids)
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT c.id,c.document_id,c.page,c.ordinal,c.content,ce.embedding_json,"
+                "d.filename,d.sha256 FROM chunks c "
+                "JOIN documents d ON d.id=c.document_id "
+                "LEFT JOIN chunk_embeddings ce ON ce.chunk_id=c.id AND ce.model=? "
+                "WHERE 1=1" + clause + " ORDER BY c.document_id,c.ordinal",
+                [embedding_model, *params],
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def save_embeddings(
+        self,
+        embeddings: list[tuple[int, list[float]]],
+        embedding_model: str,
+    ) -> None:
+        """Persist computed embeddings transactionally for later hybrid queries.
+
+        Embeddings are derived/cache data. Source PDF text remains in ``chunks``.
+        Re-running this method for the same chunk/model is idempotent.
+        """
+        if not embeddings:
+            return
+        if not embedding_model:
+            raise ValueError("embedding_model must not be empty")
+
+        payload = [
+            (chunk_id, embedding_model, json.dumps(vector))
+            for chunk_id, vector in embeddings
+        ]
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.executemany(
+                "INSERT INTO chunk_embeddings(chunk_id,model,embedding_json) VALUES(?,?,?) "
+                "ON CONFLICT(chunk_id,model) DO UPDATE SET "
+                "embedding_json=excluded.embedding_json, "
+                "created_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+                payload,
+            )
+
+    def embedding_status(
+        self,
+        document_ids: list[str] | None,
+        embedding_model: str,
+    ) -> dict:
+        """Return cache coverage for diagnostics without exposing vector data."""
+        if document_ids == []:
+            return {"total": 0, "ready": 0, "missing": 0, "model": embedding_model}
+
+        clause, params = self._chunk_query_where(document_ids)
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT COUNT(*) AS total, COUNT(ce.chunk_id) AS ready "
+                "FROM chunks c LEFT JOIN chunk_embeddings ce "
+                "ON ce.chunk_id=c.id AND ce.model=? WHERE 1=1" + clause,
+                [embedding_model, *params],
+            ).fetchone()
+            total = int(row["total"])
+            ready = int(row["ready"])
+            return {
+                "total": total,
+                "ready": ready,
+                "missing": total - ready,
+                "model": embedding_model,
+            }
 
     def missing_document_ids(self, ids: list[str]) -> list[str]:
         if not ids:
