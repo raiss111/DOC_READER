@@ -53,8 +53,6 @@ def definition_subject(question: str) -> str | None:
     return None
 
 
-
-
 def is_contextual_followup(question: str) -> bool:
     """Detect a follow-up whose meaning depends on the preceding exchange."""
     normalized = _normalized_words(question)
@@ -93,6 +91,21 @@ def _asks_for_priority(question: str) -> bool:
         r"indispensable|indispensables)\b",
         normalized,
     ))
+
+
+def _query_term_coverage(content: str, query: str) -> int:
+    """Count distinct substantive query terms actually present in a passage.
+
+    This is intentionally simple and deterministic. It prevents a generic
+    importance cue ("pivot", "point de départ", etc.) from overriding a passage
+    that matches the concrete subject of a contextual follow-up.
+    """
+    query_terms = set(tokenize(query))
+    if not query_terms:
+        return 0
+    content_terms = set(tokenize(content))
+    return len(query_terms & content_terms)
+
 
 def _contains_explicit_definition(content: str, subject: str) -> bool:
     """Prefer an explicit 'X est ...' definition over incidental mentions of X."""
@@ -175,10 +188,25 @@ class Retriever:
             ranked.sort(key=lambda hit: not _contains_explicit_definition(hit["content"], subject))
 
         if _asks_for_priority(query):
-            # A request such as "les plus importantes" must be backed by explicit
-            # wording in the source, not by the LLM's intuition. Stable sorting
-            # preserves the retrieval score when two passages carry equal evidence.
-            ranked.sort(key=lambda hit: -_priority_evidence_score(hit["content"]))
+            # Keep explicit importance evidence, but never let generic cues such as
+            # "pivot" or "point de départ" erase the concrete subject of the query.
+            #
+            # In lexical mode, subject coverage is the primary key. This fixes
+            # contextual follow-ups such as "Et lesquelles sont les plus importantes ?"
+            # when the preceding answer named concrete items (e.g. clarté, précision,
+            # sobriété, rigueur). The old implementation sorted only on priority cues
+            # and could therefore jump to unrelated passages containing "pivot".
+            #
+            # Semantic mode keeps the previous behavior to avoid changing its
+            # optional scoring semantics in this V4.1 bug fix.
+            if self.settings.retrieval_mode == "semantic":
+                ranked.sort(key=lambda hit: -_priority_evidence_score(hit["content"]))
+            else:
+                ranked.sort(key=lambda hit: (
+                    -_query_term_coverage(hit["content"], query),
+                    -_priority_evidence_score(hit["content"]),
+                    -float(hit.get("score", 0.0)),
+                ))
 
         selected: list[dict] = []
         # Comparison / synthesis across several documents needs coverage when top_k allows it.
