@@ -188,6 +188,31 @@ function isChatTurn(mode) {
 }
 
 // ============================================================
+//  Détecte une salutation côté frontend.
+//  Le backend accepte ces messages même sans document attaché,
+//  donc on ne bloque pas l'envoi dans ce cas.
+// ============================================================
+function looksLikeGreeting(text) {
+  const normalized = text
+    .toLowerCase()
+    .replace(/[^a-zà-ÿ0-9'’ ]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const patterns = [
+    /^(bonjour|bonsoir|salut|hello|hi|hey|coucou)( (ça va|ca va|comment vas tu|comment allez vous|how are you))?$/,
+    /^(merci|merci beaucoup|je te remercie|je vous remercie|thanks|thank you|thanks a lot|thank you very much)$/,
+    /^(au revoir|à bientôt|a bientot|bonne journée|bonne journee|bonne soirée|bonne soiree|goodbye|bye|see you|see you later)$/,
+    /^(ça va|ca va|comment vas tu|comment allez vous|how are you)$/,
+    /^(привет|здравствуйте|добрый день|добрый вечер)( как дела)?$/,
+    /^(спасибо|большое спасибо)$/,
+    /^(до свидания|пока|до встречи)$/,
+    /^как дела$/,
+  ];
+  return patterns.some((p) => p.test(normalized));
+}
+
+// ============================================================
 //  Titre auto : tronque proprement au dernier mot complet
 // ============================================================
 function makeTitle(text) {
@@ -992,13 +1017,25 @@ form.addEventListener("submit", async (event) => {
     if (!convo) return;
   }
 
-  // Rafraîchit currentConvo depuis le serveur
+  // Rafraîchit currentConvo depuis le serveur pour connaître
+  // ses documents réels avant de décider d'envoyer ou non.
   try {
     const resConvo = await apiFetch(`${CONVOS_URL}/${currentConvoId}`, { headers: authHeaders() });
     currentConvo = await resConvo.json();
     const idx = conversationsCache.findIndex((c) => c.id === currentConvoId);
     if (idx !== -1) conversationsCache[idx] = currentConvo;
   } catch {}
+
+  // ⚠️ Conversation sans document → on bloque,
+  // sauf pour les salutations que le backend accepte sans document.
+  const convoDocs = getConversationDocuments();
+  if (convoDocs.length === 0 && !looksLikeGreeting(text)) {
+    appendSystemMessage(
+      "Aucun document n'est associé à cette conversation. " +
+      "Ajoutez ou sélectionnez un document pour commencer."
+    );
+    return;
+  }
 
   const wasEmpty = currentConvo && currentConvo.message_count === 0;
 
